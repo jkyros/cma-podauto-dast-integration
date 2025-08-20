@@ -158,6 +158,22 @@ spec:
           value: "$(tasks.provision-cluster.results.clusterName)"
         - name: credentials
           value: credentials
+      - name: create-namespace
+        image: quay.io/jkyros/kubectl:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          echo "Creating namespace: $NAMESPACE"
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          echo "Namespace $NAMESPACE is ready"
       - name: operator-sdk-run-bundle
         image: quay.io/operator-framework/operator-sdk:latest
         env:
@@ -169,6 +185,8 @@ spec:
         args:
         - run
         - bundle
+        - --security-context-config
+        - restricted
         - --namespace
         - "$(params.namespace)"
         - --timeout
