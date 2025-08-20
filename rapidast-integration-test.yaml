@@ -447,12 +447,37 @@ spec:
           # Create a secret with the ephemeral cluster kubeconfig for RapiDAST
           SECRET_NAME="rapidast-cluster-credentials-$(date +%s)"
           
+          echo "DEBUG: Checking ephemeral cluster kubeconfig file..."
+          echo "KUBECONFIG_FILE: $KUBECONFIG_FILE"
+          if [ -f "$KUBECONFIG_FILE" ]; then
+            echo "✅ Kubeconfig file exists"
+            echo "File size: $(wc -c < "$KUBECONFIG_FILE") bytes"
+            echo "First few lines:"
+            head -10 "$KUBECONFIG_FILE" || true
+          else
+            echo "❌ ERROR: Kubeconfig file does not exist at $KUBECONFIG_FILE"
+            ls -la /credentials/ || true
+            exit 1
+          fi
+          
+          echo "DEBUG: Testing ephemeral cluster access..."
+          KUBECONFIG="$KUBECONFIG_FILE" oc whoami || {
+            echo "❌ ERROR: Cannot authenticate with ephemeral cluster"
+            exit 1
+          }
+          
+          echo "✅ Ephemeral cluster access confirmed"
+          KUBECONFIG="$KUBECONFIG_FILE" oc whoami
+          
           echo "Creating secret $SECRET_NAME with ephemeral cluster kubeconfig..."
           oc create secret generic "$SECRET_NAME" \
             --from-file=kubeconfig="$KUBECONFIG_FILE" \
             --dry-run=client -o yaml | oc apply -f -
             
-          echo "Secret created successfully"
+          echo "DEBUG: Verifying created secret..."
+          oc get secret "$SECRET_NAME" -o yaml | head -20
+          
+          echo "Secret created successfully: $SECRET_NAME"
           echo -n "$SECRET_NAME" | tee "$(results.kubeconfig-secret.path)"
 
   - name: rapidast-check
