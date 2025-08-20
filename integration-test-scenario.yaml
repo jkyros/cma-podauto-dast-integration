@@ -1,0 +1,30 @@
+# Example IntegrationTestScenario for Custom Metrics Autoscaler Operator DAST scanning
+# This configures Konflux to run RapiDAST security scans on snapshots
+apiVersion: appstudio.redhat.com/v1beta1
+kind: IntegrationTestScenario
+metadata:
+  name: cma-rapidast-dast-scan
+  namespace: cma-podauto-tenant  # Replace with your actual namespace
+  labels:
+    test.appstudio.openshift.io/type: integration
+  annotations:
+    description: "RapiDAST DAST security scanning for Custom Metrics Autoscaler Operator"
+spec:
+  application: custom-metrics-autoscaler-operator  # Replace with your application name
+  # Use the ephemeral cluster version for comprehensive testing
+  resolverRef:
+    resolver: git
+    params:
+    - name: url
+      value: https://github.com/jkyros/cma-podauto-dast-integration  # Replace with your repo URL
+    - name: revision
+      value: main  # or your default branch
+    - name: pathInRepo
+      value: rapidast-integration-test.yaml
+  params:
+  - name: SNAPSHOT
+    value: "$(params.SNAPSHOT)"
+  # Optional: Configure test execution context
+  contexts:
+  - name: application
+    description: "Application context for DAST scanning"
