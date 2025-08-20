@@ -193,88 +193,112 @@ spec:
           echo "Namespace: $NAMESPACE"
           echo "Timeout: $(params.installTimeout)"
           
-          # Function to capture debugging information
-          capture_debug_info() {
-            echo "=========================================="
-            echo "DEBUGGING INFORMATION - OPERATOR INSTALLATION FAILED"
-            echo "=========================================="
-            
-            echo "=== NAMESPACE STATUS ==="
-            kubectl get namespace "$NAMESPACE" -o yaml || true
-            
-            echo "=== DEPLOYMENTS ==="
-            kubectl get deployments -n "$NAMESPACE" -o wide || true
-            
-            echo "=== PODS ==="
-            kubectl get pods -n "$NAMESPACE" -o wide || true
-            
-            echo "=== EVENTS ==="
-            kubectl get events -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp || true
-            
-            echo "=== CSVS ==="
-            kubectl get csv -n "$NAMESPACE" -o wide || true
-            
-            echo "=== SUBSCRIPTIONS ==="
-            kubectl get subscriptions -n "$NAMESPACE" -o wide || true
-            
-            echo "=== CATALOG SOURCES ==="
-            kubectl get catalogsources -n "$NAMESPACE" -o wide || true
-            
-            echo "=== OPERATOR GROUPS ==="
-            kubectl get operatorgroups -n "$NAMESPACE" -o wide || true
-            
-            echo "=== INSTALL PLANS ==="
-            kubectl get installplans -n "$NAMESPACE" -o wide || true
-            
-            # Get detailed status of any failed pods
-            echo "=== FAILED POD DETAILS ==="
-            for pod in $(kubectl get pods -n "$NAMESPACE" --field-selector=status.phase=Failed -o name 2>/dev/null || true); do
-              echo "--- Pod: $pod ---"
-              kubectl describe "$pod" -n "$NAMESPACE" || true
-              echo "--- Pod Logs: $pod ---"
-              kubectl logs "$pod" -n "$NAMESPACE" --previous=true || true
-              kubectl logs "$pod" -n "$NAMESPACE" || true
-            done
-            
-            # Get details of pods that are not running
-            echo "=== NON-RUNNING POD DETAILS ==="
-            for pod in $(kubectl get pods -n "$NAMESPACE" --field-selector=status.phase!=Running,status.phase!=Succeeded -o name 2>/dev/null || true); do
-              echo "--- Pod: $pod ---"
-              kubectl describe "$pod" -n "$NAMESPACE" || true
-              echo "--- Pod Logs: $pod ---"
-              kubectl logs "$pod" -n "$NAMESPACE" --previous=true || true
-              kubectl logs "$pod" -n "$NAMESPACE" || true
-            done
-            
-            # Get CSV details if they exist
-            echo "=== CSV DETAILS ==="
-            for csv in $(kubectl get csv -n "$NAMESPACE" -o name 2>/dev/null || true); do
-              echo "--- CSV: $csv ---"
-              kubectl describe "$csv" -n "$NAMESPACE" || true
-              kubectl get "$csv" -n "$NAMESPACE" -o yaml || true
-            done
-            
-            echo "=========================================="
-            echo "END DEBUGGING INFORMATION"
-            echo "=========================================="
-          }
-          
-          # Set up trap to capture debug info on failure
-          trap 'capture_debug_info' ERR
-          
-          # Run operator-sdk with explicit error handling
-          if ! operator-sdk run bundle \
+          # Run operator-sdk and capture exit code, but don't fail the step
+          if operator-sdk run bundle \
             --security-context-config restricted \
             --namespace "$NAMESPACE" \
             --timeout "$(params.installTimeout)" \
             "$(params.bundleImage)"; then
             
-            echo "ERROR: operator-sdk run bundle failed"
-            capture_debug_info
-            exit 1
+            echo "Operator bundle installation completed successfully!"
+            echo "SUCCESS" > /credentials/operator-install-status
+          else
+            EXIT_CODE=$?
+            echo "ERROR: operator-sdk run bundle failed with exit code $EXIT_CODE"
+            echo "FAILED" > /credentials/operator-install-status
+            # Don't exit here - let the debug step handle the failure
+          fi
+      - name: debug-operator-failure
+        image: quay.io/konflux-ci/konflux-test:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          
+          # Check if operator installation failed
+          if [ -f /credentials/operator-install-status ] && [ "$(cat /credentials/operator-install-status)" = "SUCCESS" ]; then
+            echo "Operator installation succeeded, skipping debug collection"
+            exit 0
           fi
           
-          echo "Operator bundle installation completed successfully!"
+          echo "=========================================="
+          echo "DEBUGGING INFORMATION - OPERATOR INSTALLATION FAILED"
+          echo "=========================================="
+          
+          echo "=== NAMESPACE STATUS ==="
+          oc get namespace "$NAMESPACE" -o yaml || true
+          
+          echo "=== DEPLOYMENTS ==="
+          oc get deployments -n "$NAMESPACE" -o wide || true
+          
+          echo "=== PODS ==="
+          oc get pods -n "$NAMESPACE" -o wide || true
+          
+          echo "=== EVENTS ==="
+          oc get events -n "$NAMESPACE" --sort-by=.metadata.creationTimestamp || true
+          
+          echo "=== CSVS ==="
+          oc get csv -n "$NAMESPACE" -o wide || true
+          
+          echo "=== SUBSCRIPTIONS ==="
+          oc get subscriptions -n "$NAMESPACE" -o wide || true
+          
+          echo "=== CATALOG SOURCES ==="
+          oc get catalogsources -n "$NAMESPACE" -o wide || true
+          
+          echo "=== OPERATOR GROUPS ==="
+          oc get operatorgroups -n "$NAMESPACE" -o wide || true
+          
+          echo "=== INSTALL PLANS ==="
+          oc get installplans -n "$NAMESPACE" -o wide || true
+          
+          # Get detailed status of any failed pods
+          echo "=== FAILED POD DETAILS ==="
+          for pod in $(oc get pods -n "$NAMESPACE" --field-selector=status.phase=Failed -o name 2>/dev/null || true); do
+            if [ -n "$pod" ]; then
+              echo "--- Pod: $pod ---"
+              oc describe "$pod" -n "$NAMESPACE" || true
+              echo "--- Pod Logs: $pod ---"
+              oc logs "$pod" -n "$NAMESPACE" --previous=true 2>/dev/null || true
+              oc logs "$pod" -n "$NAMESPACE" 2>/dev/null || true
+            fi
+          done
+          
+          # Get details of pods that are not running
+          echo "=== NON-RUNNING POD DETAILS ==="
+          for pod in $(oc get pods -n "$NAMESPACE" --field-selector=status.phase!=Running,status.phase!=Succeeded -o name 2>/dev/null || true); do
+            if [ -n "$pod" ]; then
+              echo "--- Pod: $pod ---"
+              oc describe "$pod" -n "$NAMESPACE" || true
+              echo "--- Pod Logs: $pod ---"
+              oc logs "$pod" -n "$NAMESPACE" --previous=true 2>/dev/null || true
+              oc logs "$pod" -n "$NAMESPACE" 2>/dev/null || true
+            fi
+          done
+          
+          # Get CSV details if they exist
+          echo "=== CSV DETAILS ==="
+          for csv in $(oc get csv -n "$NAMESPACE" -o name 2>/dev/null || true); do
+            if [ -n "$csv" ]; then
+              echo "--- CSV: $csv ---"
+              oc describe "$csv" -n "$NAMESPACE" || true
+              oc get "$csv" -n "$NAMESPACE" -o yaml || true
+            fi
+          done
+          
+          echo "=========================================="
+          echo "END DEBUGGING INFORMATION"
+          echo "=========================================="
+          
+          # Re-exit with error to fail the task since operator installation failed
+          exit 1
   - name: configure-keda
     runAfter:
     - deploy-operator
