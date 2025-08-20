@@ -119,9 +119,118 @@ spec:
           value: $(tasks.provision-eaas-space.results.secretRef)
         - name: version
           value: "$(steps.pick-version.results.version)"
-  - name: deploy-operator
+
+  - name: configure-image-mirrors
     runAfter:
     - provision-cluster
+    taskSpec:
+      params:
+      - name: namespace
+        type: string
+      volumes:
+      - name: credentials
+        emptyDir: {}
+      steps:
+      - name: get-kubeconfig
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: clusterName
+          value: "$(tasks.provision-cluster.results.clusterName)"
+        - name: credentials
+          value: credentials
+      - name: apply-idms
+        image: quay.io/konflux-ci/konflux-test:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          echo "Applying ImageDigestMirrorSet to redirect registry.redhat.io references to quay.io build artifacts..."
+          
+          # Apply IDMS to mirror production image references to build artifacts
+          oc apply -f - <<EOF
+          apiVersion: operator.openshift.io/v1alpha1
+          kind: ImageDigestMirrorSet
+          metadata:
+            name: cma-test-mirror-set
+          spec:
+            imageDigestMirrors:
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator-bundle
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator-bundle
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-adapter
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-adapter
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-webhooks
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-webhooks
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-operator
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-operator
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
+          EOF
+          
+          echo "IDMS applied. Waiting for machine config to be applied and nodes to restart..."
+          
+          # Wait for machine config pool to start updating
+          timeout 300s bash -c '
+            until oc get mcp worker -o jsonpath="{.status.conditions[?(@.type==\"Updating\")].status}" | grep -q "True"; do
+              echo -n "."
+              sleep 10
+            done
+          ' || echo "Machine config pool may not have started updating yet - continuing..."
+          
+          echo "Waiting for machine config pool to finish updating (this may take several minutes)..."
+          
+          # Wait for machine config pool to finish updating
+          timeout 1200s bash -c '
+            until oc get mcp worker -o jsonpath="{.status.conditions[?(@.type==\"Updated\")].status}" | grep -q "True"; do
+              echo -n "."
+              sleep 30
+            done
+          ' || {
+            echo "WARNING: Machine config pool update timed out - operator installation may fail"
+            echo "Current MCP status:"
+            oc get mcp worker -o yaml || true
+          }
+          
+          echo "Image mirroring configuration complete!"
+    params:
+    - name: namespace
+      value: "$(params.NAMESPACE)"
+
+  - name: deploy-operator
+    runAfter:
+    - configure-image-mirrors
     params:
     - name: bundleImage
       value: "$(tasks.extract-bundle-image.results.bundle-image)"
@@ -159,7 +268,7 @@ spec:
         - name: credentials
           value: credentials
       - name: create-namespace
-        image: quay.io/jkyros/kubectl:latest
+        image: quay.io/konflux-ci/konflux-test:latest
         env:
         - name: KUBECONFIG
           value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
@@ -172,7 +281,7 @@ spec:
           #!/bin/bash
           set -euxo pipefail
           echo "Creating namespace: $NAMESPACE"
-          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          oc create namespace "$NAMESPACE" --dry-run=client -o yaml | oc apply -f -
           echo "Namespace $NAMESPACE is ready"
       - name: operator-sdk-run-bundle
         image: quay.io/operator-framework/operator-sdk:latest
