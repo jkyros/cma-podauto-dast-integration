@@ -1,292 +1,290 @@
-# RapiDAST Integration Test Pipeline for Custom Metrics Autoscaler Operator (OLM Bundle)
-# This pipeline is adapted from the RapiDAST Konflux example to work with OLM bundle installation
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
   name: cma-rapidast-integration-test
 spec:
+  description: |
+    Integration test that provisions an ephemeral Hypershift cluster, deploys the
+    Custom Metrics Autoscaler Operator bundle from a Konflux snapshot, and runs
+    RapiDAST security scanning against the operator endpoints.
   params:
-    # This SNAPSHOT should be produced by the build pipeline and contain the bundle containerImage
-    - name: SNAPSHOT
-      type: string
+  - description: Snapshot of the application containing the operator bundle
+    name: SNAPSHOT
+    type: string
+  - description: Namespace where the operator bundle will be deployed
+    name: NAMESPACE
+    default: openshift-keda
+    type: string
+  - description: Duration to wait for bundle installation to complete before failing
+    name: INSTALL_TIMEOUT
+    default: 10m
+    type: string
   tasks:
-    # We need a clean environment where we have permission to deploy k8s resources
-    # For operators that require cluster-admin, we use ephemeral EaaS cluster
-    - name: provision-env
-      taskRef:
-        params:
-          - name: name
-            value: eaas-create-ephemeral-cluster-hypershift-aws
-          - name: bundle
-            value: quay.io/konflux-ci/tekton-catalog/stepaction-eaas-create-ephemeral-cluster-hypershift-aws:0.1@sha256:7a84c13f9bbdfb7063b2cdc81ce42b8dfdb42b07f35dd0de22e5ea71b65d1b57
-          - name: kind
-            value: stepaction
-        resolver: bundles
+  - name: extract-bundle-image
+    taskSpec:
       params:
-        - name: ownerName
-          value: $(context.pipelineRun.name)
-        - name: ownerUid
-          value: $(context.pipelineRun.uid)
-
-    # Install the operator bundle using OLM
-    - name: install-operator
-      params:
+      - name: SNAPSHOT
+        type: string
+      results:
+      - name: bundle-image
+        description: Bundle image extracted from snapshot
+      steps:
+      - name: extract-image
+        image: quay.io/konflux-ci/konflux-test:latest
+        env:
         - name: SNAPSHOT
           value: "$(params.SNAPSHOT)"
-      runAfter:
-      - provision-env
-      taskSpec:
-        params:
-          - name: SNAPSHOT
-            type: string
-        volumes:
-          - name: credentials
-            emptyDir: {}
-        steps:
-          # Write the kubeconfig to a volume we can use in subsequent steps
-          - name: get-kubeconfig
-            image: quay.io/konflux-ci/konflux-test:latest
-            env:
-              - name: KUBECONFIG
-                value: /credentials/kubeconfig.yml
-              - name: KUBECONFIG_VALUE
-                valueFrom:
-                  secretKeyRef:
-                    name: "$(tasks.provision-env.results.secretRef)"
-                    key: kubeconfig
-            volumeMounts:
-              - name: credentials
-                mountPath: /credentials
-            script: |
-              #!/bin/bash
-              set -euxo pipefail
-
-              cat <<< "$KUBECONFIG_VALUE" > "$KUBECONFIG"
-              echo "Wrote kubeconfig for ephemeral cluster to $KUBECONFIG"
-
-          # Install the operator using OLM bundle from snapshot
-          - name: install-operator-bundle
-            image: quay.io/konflux-ci/konflux-test:latest
-            env:
-              - name: SNAPSHOT
-                value: "$(params.SNAPSHOT)"
-              - name: KUBECONFIG
-                value: /credentials/kubeconfig.yml
-            volumeMounts:
-              - name: credentials
-                mountPath: /credentials
-            script: |
-              #!/bin/bash
-              set -euxo pipefail
-
-              # Extract the bundle image from the snapshot
-              BUNDLE_IMAGE=$(echo "$SNAPSHOT" | jq -r '.components[] | select(.name == "custom-metrics-autoscaler-operator-bundle") | .containerImage')
-              
-              if [ -z "$BUNDLE_IMAGE" ] || [ "$BUNDLE_IMAGE" = "null" ]; then
-                echo "ERROR: No bundle image found in snapshot for custom-metrics-autoscaler-operator-bundle component"
-                exit 1
-              fi
-              
-              echo "Using bundle image: $BUNDLE_IMAGE"
-
-              # Create catalog source from bundle image
-              oc apply -f - <<EOF
-              apiVersion: operators.coreos.com/v1alpha1
-              kind: CatalogSource
-              metadata:
-                name: rapidast-test-catalog
-                namespace: openshift-marketplace
-              spec:
-                sourceType: grpc
-                image: "$BUNDLE_IMAGE"
-                displayName: "RapiDAST Test CMA Catalog"
-                publisher: Red Hat
-                updateStrategy:
-                  registryPoll:
-                    interval: 10m0s
-              EOF
-
-              # Wait for catalog source to be ready
-              echo "Waiting for catalog source to be ready..."
-              oc wait --for=condition=Ready catalogsource/rapidast-test-catalog -n openshift-marketplace --timeout=300s
-
-              # Wait for package manifest to become available
-              echo "Waiting for package manifest to become available..."
-              timeout 300s bash -c '
-                until oc get packagemanifest | grep -q "openshift-custom-metrics-autoscaler-operator.*RapiDAST Test CMA Catalog"; do
-                  echo -n .
-                  sleep 5
-                done
-              '
-              echo " Package manifest available"
-
-              # Get the current CSV from package manifest
-              CURRENT_CSV=$(oc get packagemanifest -o json | jq -r '
-                .items[] | 
-                select(.metadata.name=="openshift-custom-metrics-autoscaler-operator" and 
-                       .metadata.labels.catalog == "rapidast-test-catalog") | 
-                .status.channels[] | 
-                select(.name == "stable") | 
-                .currentCSV
-              ')
-
-              if [ -z "$CURRENT_CSV" ] || [ "$CURRENT_CSV" = "null" ]; then
-                echo "ERROR: Could not find current CSV for openshift-custom-metrics-autoscaler-operator"
-                exit 1
-              fi
-
-              echo "Found current CSV: $CURRENT_CSV"
-
-              # Create namespace for the operator
-              oc apply -f - <<EOF
-              apiVersion: v1
-              kind: Namespace
-              metadata:
-                labels:
-                  kubernetes.io/metadata.name: openshift-keda
-                  openshift.io/cluster-monitoring: "true"
-                name: openshift-keda
-              EOF
-
-              # Create OperatorGroup
-              oc apply -f - <<EOF
-              apiVersion: operators.coreos.com/v1
-              kind: OperatorGroup
-              metadata:
-                annotations:
-                  olm.providedAPIs: ClusterTriggerAuthentication.v1alpha1.keda.sh,KedaController.v1alpha1.keda.sh,ScaledJob.v1alpha1.keda.sh,ScaledObject.v1alpha1.keda.sh,TriggerAuthentication.v1alpha1.keda.sh
-                generateName: openshift-keda-
-                namespace: openshift-keda
-              spec:
-                upgradeStrategy: Default
-                targetNamespaces:
-                - openshift-keda
-              EOF
-
-              # Create subscription
-              oc apply -f - <<EOF
-              apiVersion: operators.coreos.com/v1alpha1
-              kind: Subscription
-              metadata:
-                labels:
-                  operators.coreos.com/openshift-custom-metrics-autoscaler-operator.openshift-keda: ""
-                name: openshift-custom-metrics-autoscaler-operator
-                namespace: openshift-keda
-              spec:
-                channel: stable
-                installPlanApproval: Automatic
-                name: openshift-custom-metrics-autoscaler-operator
-                source: rapidast-test-catalog
-                sourceNamespace: openshift-marketplace
-                startingCSV: $CURRENT_CSV
-              EOF
-
-              # Wait for operator deployment to be available
-              echo "Waiting for operator deployment to be ready..."
-              timeout 600s bash -c '
-                until [ "$(oc get deployment -n openshift-keda custom-metrics-autoscaler-operator -o jsonpath="{.status.conditions[?(@.type==\"Available\")].status}" 2>/dev/null)" = "True" ]; do
-                  echo -n .
-                  sleep 5
-                done
-              '
-              echo " Operator deployment ready"
-
-              # Create KedaController instance
-              oc apply -f - <<EOF
-              apiVersion: keda.sh/v1alpha1
-              kind: KedaController
-              metadata:
-                name: keda
-                namespace: openshift-keda
-              spec:
-                metricsServer:
-                  logLevel: "0"
-                operator:
-                  logEncoder: console
-                  logLevel: info
-                serviceAccount: {}
-                watchNamespace: ""
-              EOF
-
-              # Wait for all KEDA components to be ready
-              echo "Waiting for KEDA components to be ready..."
-              
-              # Wait for keda-metrics-apiserver
-              timeout 300s bash -c '
-                until [ "$(oc get deployment -n openshift-keda keda-metrics-apiserver -o jsonpath="{.status.conditions[?(@.type==\"Available\")].status}" 2>/dev/null)" = "True" ]; do
-                  echo -n .
-                  sleep 5
-                done
-              '
-              echo " keda-metrics-apiserver ready"
-              
-              # Wait for keda-operator
-              timeout 300s bash -c '
-                until [ "$(oc get deployment -n openshift-keda keda-operator -o jsonpath="{.status.conditions[?(@.type==\"Available\")].status}" 2>/dev/null)" = "True" ]; do
-                  echo -n .
-                  sleep 5
-                done
-              '
-              echo " keda-operator ready"
-
-              echo "Custom Metrics Autoscaler Operator installation complete!"
-
-    - name: rapidast-check
-      runAfter:
-      - install-operator
-      taskRef:
-        resolver: git
-        params:
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          echo "Extracting bundle image from snapshot..."
+          BUNDLE_IMAGE=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name | test(".*bundle.*"; "i")) | .containerImage' | head -1)
+          if [ -z "$BUNDLE_IMAGE" ] || [ "$BUNDLE_IMAGE" = "null" ]; then
+            BUNDLE_IMAGE=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name == "custom-metrics-autoscaler-operator-bundle") | .containerImage')
+          fi
+          if [ -z "$BUNDLE_IMAGE" ] || [ "$BUNDLE_IMAGE" = "null" ]; then
+            echo "ERROR: No bundle image found"
+            echo "Available components:"
+            echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?)?.name' | sed 's/^/  - /'
+            exit 1
+          fi
+          echo "Found bundle image: $BUNDLE_IMAGE"
+          echo -n "$BUNDLE_IMAGE" | tee "$(results.bundle-image.path)"
+    params:
+    - name: SNAPSHOT
+      value: $(params.SNAPSHOT)
+  - name: provision-eaas-space
+    runAfter:
+    - extract-bundle-image
+    taskRef:
+      resolver: git
+      params:
+      - name: url
+        value: https://github.com/konflux-ci/build-definitions.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: task/eaas-provision-space/0.1/eaas-provision-space.yaml
+    params:
+    - name: ownerName
+      value: $(context.pipelineRun.name)
+    - name: ownerUid
+      value: $(context.pipelineRun.uid)
+  - name: provision-cluster
+    runAfter:
+    - provision-eaas-space
+    taskSpec:
+      results:
+      - name: clusterName
+        value: "$(steps.create-cluster.results.clusterName)"
+      steps:
+      - name: get-supported-versions
+        ref:
+          resolver: git
+          params:
           - name: url
-            value: https://github.com/redhatproductsecurity/rapidast
+            value: https://github.com/konflux-ci/build-definitions.git
           - name: revision
-            value: development
+            value: main
           - name: pathInRepo
-            value: examples/konflux/rapidast-check.yaml
-      params:
-        - name: KUBECONFIG_SECRET
-          value: "$(tasks.provision-env.results.secretRef)"
-        # Port-forward the KEDA metrics server and operator endpoints
-        - name: PORT_FORWARD_TARGETS
-          value: "service/keda-metrics-apiserver -n openshift-keda 9443:9443,service/keda-operator-metrics-service -n openshift-keda 8080:8080"
-        # RapiDAST configuration targeting the operator's metrics endpoints
-        - name: RAPIDAST_CONFIG_VALUE
-          value: |
-            config:
-              configVersion: 6
-              results:
-                exclusions:
-                  rules:
-                    - name: "Exclude findings below a severity level of Important"
-                      cel_expression: ".result.level != 'error' && .result.level != 'warning'"
-
-            application:
-              shortName: "custom-metrics-autoscaler-operator"
-              url: "https://127.0.0.1:9443" # KEDA metrics API server endpoint
-
-            scanners:
-              zap:
-                spider:
-                  maxDuration: 5  # Limited duration for operator endpoints
-                passiveScan:
-                  maxDuration: 10
-                activeScan:
-                  policy: API-scan-minimal
-                  maxDuration: 10
-
-    # Cleanup the ephemeral cluster
-    - name: cleanup-env
-      runAfter:
-      - rapidast-check
-      taskRef:
+            value: stepactions/eaas-get-supported-ephemeral-cluster-versions/0.1/eaas-get-supported-ephemeral-cluster-versions.yaml
         params:
-          - name: name
-            value: eaas-delete-ephemeral-cluster-hypershift-aws
-          - name: bundle
-            value: quay.io/konflux-ci/tekton-catalog/stepaction-eaas-delete-ephemeral-cluster-hypershift-aws:0.1@sha256:cc1b07aa8e7b169bb27e6c9cf80c28bfd1e6b3a6c0c5c6b1b1f1e6b3a6c0c5c6
-          - name: kind
-            value: stepaction
-        resolver: bundles
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+      - name: pick-version
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-latest-openshift-version-by-prefix/0.1/eaas-get-latest-openshift-version-by-prefix.yaml
+        params:
+        - name: prefix
+          value: "$(steps.get-supported-versions.results.versions[0])."
+      - name: create-cluster
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-create-ephemeral-cluster-hypershift-aws/0.1/eaas-create-ephemeral-cluster-hypershift-aws.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: version
+          value: "$(steps.pick-version.results.version)"
+  - name: deploy-operator
+    runAfter:
+    - provision-cluster
+    params:
+    - name: bundleImage
+      value: "$(tasks.extract-bundle-image.results.bundle-image)"
+    - name: namespace
+      value: "$(params.NAMESPACE)"
+    - name: installTimeout
+      value: "$(params.INSTALL_TIMEOUT)"
+    taskSpec:
       params:
-        - name: KUBECONFIG_SECRET
-          value: "$(tasks.provision-env.results.secretRef)" 
+      - name: bundleImage
+        type: string
+      - name: namespace
+        type: string
+      - name: installTimeout
+        type: string
+      volumes:
+      - name: credentials
+        emptyDir: {}
+      steps:
+      - name: get-kubeconfig
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: clusterName
+          value: "$(tasks.provision-cluster.results.clusterName)"
+        - name: credentials
+          value: credentials
+      - name: operator-sdk-run-bundle
+        image: quay.io/operator-framework/operator-sdk:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        args:
+        - run
+        - bundle
+        - --namespace
+        - "$(params.namespace)"
+        - --timeout
+        - "$(params.installTimeout)"
+        - "$(params.bundleImage)"
+  - name: configure-keda
+    runAfter:
+    - deploy-operator
+    taskSpec:
+      params:
+      - name: namespace
+        type: string
+      volumes:
+      - name: credentials
+        emptyDir: {}
+      steps:
+      - name: get-kubeconfig
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: clusterName
+          value: "$(tasks.provision-cluster.results.clusterName)"
+        - name: credentials
+          value: credentials
+      - name: create-kedacontroller
+        image: quay.io/konflux-ci/konflux-test:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          echo "Creating KedaController instance in namespace: $NAMESPACE"
+          oc apply -f - <<EOF
+          apiVersion: keda.sh/v1alpha1
+          kind: KedaController
+          metadata:
+            name: keda
+            namespace: $NAMESPACE
+          spec:
+            metricsServer:
+              logLevel: "0"
+            operator:
+              logEncoder: console
+              logLevel: info
+            serviceAccount: {}
+            watchNamespace: ""
+          EOF
+          echo "Waiting for KEDA components to be ready..."
+          timeout 300s bash -c "
+            until [ \"\$(oc get deployment -n $NAMESPACE keda-metrics-apiserver -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status}' 2>/dev/null)\" = \"True\" ]; do
+              echo -n .
+              sleep 5
+            done
+          "
+          echo " keda-metrics-apiserver ready"
+          timeout 300s bash -c "
+            until [ \"\$(oc get deployment -n $NAMESPACE keda-operator -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status}' 2>/dev/null)\" = \"True\" ]; do
+              echo -n .
+              sleep 5
+            done
+          "
+          echo " keda-operator ready"
+          echo "Custom Metrics Autoscaler Operator is ready!"
+    params:
+    - name: namespace
+      value: "$(params.NAMESPACE)"
+  - name: rapidast-check
+    runAfter:
+    - configure-keda
+    taskRef:
+      resolver: git
+      params:
+      - name: url
+        value: https://github.com/redhatproductsecurity/rapidast
+      - name: revision
+        value: development
+      - name: pathInRepo
+        value: examples/konflux/rapidast-check.yaml
+    params:
+    - name: KUBECONFIG_SECRET
+      value: "$(tasks.provision-eaas-space.results.secretRef)"
+    - name: PORT_FORWARD_TARGETS
+      value: "service/keda-metrics-apiserver -n $(params.NAMESPACE) 9443:9443,service/keda-operator-metrics-service -n $(params.NAMESPACE) 8080:8080"
+    - name: RAPIDAST_CONFIG_VALUE
+      value: |
+        config:
+          configVersion: 6
+          results:
+            exclusions:
+              rules:
+                - name: "Exclude findings below a severity level of Important"
+                  cel_expression: ".result.level != 'error' && .result.level != 'warning'"
+        application:
+          shortName: "custom-metrics-autoscaler-operator"
+          url: "https://127.0.0.1:9443"
+        scanners:
+          zap:
+            spider:
+              maxDuration: 5
+            passiveScan:
+              maxDuration: 10
+            activeScan:
+              policy: API-scan-minimal
+              maxDuration: 10
