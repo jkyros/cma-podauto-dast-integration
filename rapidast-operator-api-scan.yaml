@@ -456,7 +456,7 @@ spec:
                       
               generic_trivy:
                   # Scan Kubernetes workloads for misconfigurations in the operator namespace
-                  inline: "trivy k8s --kubeconfig=$KUBECONFIG -n $NAMESPACE --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
+                  inline: "trivy k8s --kubeconfig=$KUBECONFIG --include-namespaces $NAMESPACE --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
           EOF
           
           echo "✅ RapiDAST configuration prepared"
@@ -604,68 +604,119 @@ spec:
             echo ""
           fi
           
-          # ZAP Results Display - Check multiple possible locations
+          # ZAP Results Display - Check multiple possible locations including deep dirs
           ZAP_RESULTS=""
-          for zap_file in /results/zap-baseline.json /results/*/zap-baseline.json /results/*/*.json; do
+          # First try to find traditional ZAP JSON reports
+          for zap_file in /results/zap-baseline.json /results/*/zap-baseline.json /results/*/*/*.json /results/*/*/*/*.json; do
             if [ -f "$zap_file" ] && grep -q "issues" "$zap_file" 2>/dev/null; then
               ZAP_RESULTS="$zap_file"
               break
             fi
           done
           
+          # If no traditional results, check for SARIF files (RapiDAST creates these)
+          if [ -z "$ZAP_RESULTS" ]; then
+            for sarif_file in /results/*/*/*.sarif /results/*/*/*/*.sarif; do
+              if [ -f "$sarif_file" ] && grep -q "runs" "$sarif_file" 2>/dev/null; then
+                ZAP_RESULTS="$sarif_file"
+                break
+              fi
+            done
+          fi
+          
           if [ -n "$ZAP_RESULTS" ] && [ -f "$ZAP_RESULTS" ]; then
             echo "📊 ZAP API Security Scan Results:"
             echo "--------------------------------"
             echo "Results file: $(basename "$ZAP_RESULTS")"
-            jq -r '.issues[]? | "- \(.level) \(.name): \(.desc)"' "$ZAP_RESULTS" | head -10
-            echo ""
-            TOTAL_ZAP_ISSUES=$(jq -r '.issues | length' "$ZAP_RESULTS" 2>/dev/null || echo "0")
-            echo "Total ZAP issues found: $TOTAL_ZAP_ISSUES"
+            
+            # Check if it's SARIF format or traditional ZAP JSON
+            if echo "$ZAP_RESULTS" | grep -q "\.sarif$" || jq -e '.version' "$ZAP_RESULTS" >/dev/null 2>&1; then
+              echo "📋 SARIF Format Results:"
+              TOTAL_ZAP_ISSUES=$(jq -r '[.runs[]?.results[]?] | length' "$ZAP_RESULTS" 2>/dev/null || echo "0")
+              echo "Total ZAP issues found: $TOTAL_ZAP_ISSUES"
+              if [ "$TOTAL_ZAP_ISSUES" -gt "0" ]; then
+                echo ""
+                echo "Sample issues:"
+                jq -r '.runs[]?.results[]? | "- \(.level // "INFO") \(.ruleId // "UNKNOWN"): \(.message.text // "No description")"' "$ZAP_RESULTS" | head -5
+              else
+                echo "✅ No security issues found in ZAP scan"
+              fi
+            else
+              echo "📋 Traditional ZAP JSON Format:"
+              jq -r '.issues[]? | "- \(.level) \(.name): \(.desc)"' "$ZAP_RESULTS" | head -10
+              echo ""
+              TOTAL_ZAP_ISSUES=$(jq -r '.issues | length' "$ZAP_RESULTS" 2>/dev/null || echo "0")
+              echo "Total ZAP issues found: $TOTAL_ZAP_ISSUES"
+            fi
             echo ""
           else
             echo "⚠️  No ZAP results found"
-            echo "Searched for: zap-baseline.json, */zap-baseline.json, */*.json with 'issues' content"
+            echo "Searched for: zap JSON files, SARIF files in deep directories"
           fi
           
-          # Trivy Results Display - Check multiple possible locations
+          # Trivy Results Display - Check multiple possible locations including deep dirs
           TRIVY_RESULTS=""
-          for trivy_file in /results/generic_trivy*.json /results/trivy*.json /results/*/trivy*.json /results/*/generic_trivy*.json; do
+          # First check for JSON files
+          for trivy_file in /results/trivy-k8s-misconfig.json /results/generic_trivy*.json /results/trivy*.json /results/*/trivy*.json /results/*/*/trivy*.json /results/*/*/*/trivy*.json; do
             if [ -f "$trivy_file" ]; then
               TRIVY_RESULTS="$trivy_file"
               break
             fi
           done
           
+          # If no JSON files, check for text output files
+          if [ -z "$TRIVY_RESULTS" ]; then
+            for trivy_text in /results/*/*/generic_trivy/stdout-report.txt /results/*/*/*/generic_trivy/stdout-report.txt /results/*/*/generic_trivy/*.txt; do
+              if [ -f "$trivy_text" ] && [ -s "$trivy_text" ]; then
+                TRIVY_RESULTS="$trivy_text"
+                break
+              fi
+            done
+          fi
+          
           if [ -n "$TRIVY_RESULTS" ] && [ -f "$TRIVY_RESULTS" ]; then
             echo "🛡️  Trivy Misconfiguration Scan Results:"
             echo "---------------------------------------"
             echo "Results file: $(basename "$TRIVY_RESULTS")"
             
-            # Check if it's SARIF format (version 2.1.0) or regular Trivy JSON
-            if jq -e '.version == "2.1.0"' "$TRIVY_RESULTS" >/dev/null 2>&1; then
-              echo "📋 SARIF Format Results:"
-              TOTAL_TRIVY_ISSUES=$(jq -r '[.runs[].results[]] | length' "$TRIVY_RESULTS" 2>/dev/null || echo "0")
-              echo "Total Trivy issues found: $TOTAL_TRIVY_ISSUES"
-              if [ "$TOTAL_TRIVY_ISSUES" -gt "0" ]; then
-                echo ""
-                echo "Sample issues:"
-                jq -r '.runs[].results[] | "- \(.level // "UNKNOWN") \(.ruleId): \(.message.text)"' "$TRIVY_RESULTS" | head -5
+            # Check if it's JSON format or text format
+            if echo "$TRIVY_RESULTS" | grep -q "\.json$" && jq empty "$TRIVY_RESULTS" >/dev/null 2>&1; then
+              # Handle JSON format (SARIF or Trivy JSON)
+              if jq -e '.version == "2.1.0"' "$TRIVY_RESULTS" >/dev/null 2>&1; then
+                echo "📋 SARIF Format Results:"
+                TOTAL_TRIVY_ISSUES=$(jq -r '[.runs[].results[]] | length' "$TRIVY_RESULTS" 2>/dev/null || echo "0")
+                echo "Total Trivy issues found: $TOTAL_TRIVY_ISSUES"
+                if [ "$TOTAL_TRIVY_ISSUES" -gt "0" ]; then
+                  echo ""
+                  echo "Sample issues:"
+                  jq -r '.runs[].results[] | "- \(.level // "UNKNOWN") \(.ruleId): \(.message.text)"' "$TRIVY_RESULTS" | head -5
+                fi
+              else
+                echo "📋 Trivy JSON Format Results:"
+                TOTAL_TRIVY_ISSUES=$(jq -r '[.Results[]?.Misconfigurations[]?] | length' "$TRIVY_RESULTS" 2>/dev/null || echo "0")
+                echo "Total Trivy misconfigurations found: $TOTAL_TRIVY_ISSUES"
+                if [ "$TOTAL_TRIVY_ISSUES" -gt "0" ]; then
+                  echo ""
+                  echo "Sample misconfigurations:"
+                  jq -r '.Results[]?.Misconfigurations[]? | "- \(.Severity) \(.ID): \(.Title)"' "$TRIVY_RESULTS" | head -5
+                fi
               fi
             else
-              echo "📋 Trivy JSON Format Results:"
-              # Standard Trivy JSON format
-              TOTAL_TRIVY_ISSUES=$(jq -r '[.Results[]?.Misconfigurations[]?] | length' "$TRIVY_RESULTS" 2>/dev/null || echo "0")
-              echo "Total Trivy misconfigurations found: $TOTAL_TRIVY_ISSUES"
-              if [ "$TOTAL_TRIVY_ISSUES" -gt "0" ]; then
-                echo ""
-                echo "Sample misconfigurations:"
-                jq -r '.Results[]?.Misconfigurations[]? | "- \(.Severity) \(.ID): \(.Title)"' "$TRIVY_RESULTS" | head -5
-              fi
+              # Handle text format
+              echo "📋 Trivy Text Output:"
+              echo ""
+              echo "Content preview:"
+              head -20 "$TRIVY_RESULTS" | grep -v "^$" | head -10
+              
+              # Try to count issues in text format
+              ISSUE_COUNT=$(grep -c -E "(HIGH|CRITICAL|MEDIUM)" "$TRIVY_RESULTS" 2>/dev/null || echo "0")
+              echo ""
+              echo "Potential issues found: $ISSUE_COUNT"
             fi
             echo ""
           else
             echo "⚠️  No Trivy results found"
-            echo "Searched for: generic_trivy*.json, trivy*.json, */trivy*.json, */generic_trivy*.json"
+            echo "Searched for: JSON files and text outputs in deep directories"
             echo "Files found in results directory:"
             find /results -name "*trivy*" -o -name "*generic*" 2>/dev/null || echo "No trivy/generic files found"
             echo ""
