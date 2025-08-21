@@ -361,9 +361,11 @@ spec:
           #!/bin/bash
           set -euxo pipefail
           
-          # Get cluster API server URL
+          # Get cluster API server URL and kubeconfig info
           API_SERVER=$(oc whoami --show-server)
+          KUBECONFIG_FILE=$(basename "$KUBECONFIG")
           echo "Cluster API server: $API_SERVER"
+          echo "Using kubeconfig: $KUBECONFIG_FILE"
           
           # Create a service account and token for RapiDAST scanning
           echo "Creating service account for RapiDAST in namespace: $NAMESPACE"
@@ -455,19 +457,26 @@ spec:
                       format: ["json","html","sarif"]
                       
               generic_trivy:
-                  # Scan Kubernetes workloads for misconfigurations in the operator namespace
-                  inline: "trivy k8s --kubeconfig=$KUBECONFIG --include-namespaces $NAMESPACE --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
+                  # Scan Kubernetes workloads for misconfigurations in the operator namespace  
+                  inline: "export KUBECONFIG=/credentials/$KUBECONFIG_FILE && echo 'Using kubeconfig: /credentials/$KUBECONFIG_FILE' && trivy k8s --include-namespaces $NAMESPACE --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
           EOF
           
           echo "✅ RapiDAST configuration prepared"
           echo "Scanning API endpoint: $API_SERVER/openapi/v3/apis/keda.sh/v1alpha1"
       - name: run-rapidast-scan
         image: quay.io/redhatproductsecurity/rapidast:latest
+        env:
+        - name: KUBECONFIG_FILE
+          value: "$(steps.get-kubeconfig.results.kubeconfig)"  
+        - name: NAMESPACE
+          value: "$(params.namespace)"
         volumeMounts:
         - name: rapidast-config
           mountPath: /rapidast-config
         - name: rapidast-results
           mountPath: /opt/rapidast/results
+        - name: credentials
+          mountPath: /credentials
         script: |
           #!/bin/bash
           set -euxo pipefail
@@ -521,51 +530,23 @@ spec:
           
           echo "🎯 CHECKPOINT 2: OpenAPI endpoint tested"
           
-          # Wait for KEDA CRDs to be ready (API group might take time to appear)
-          echo "⏳ Waiting for KEDA CRDs to be ready (max 2.5min)..."
-          KEDA_FOUND=false
-          for i in {1..15}; do  # Reduced from 30 to 15 (75 seconds total)
-            echo "Attempt $i/15 - checking for keda.sh API group..."
-            if timeout 10s oc api-resources --api-group=keda.sh >/dev/null 2>&1; then
-              echo "✅ keda.sh API group is available"
-              KEDA_FOUND=true
-              break
-            fi
-            sleep 5
-          done
-          
-          if [ "$KEDA_FOUND" = "false" ]; then
-            echo "⚠️ keda.sh API group not found after waiting, continuing with fallback"
-          fi
+          # Since OpenAPI endpoint test succeeded, KEDA APIs are available - proceed with scan
+          echo "✅ KEDA API endpoint confirmed accessible via HTTP - proceeding with scan"
           echo ""
           
-          echo "🎯 CHECKPOINT 3: KEDA API group check completed"
-          
-          # Simplified API group check
-          echo "🔍 Final API group verification..."
-          if oc api-resources --api-group=keda.sh >/dev/null 2>&1; then
-            echo "✅ keda.sh API group confirmed available"
-            oc api-resources --api-group=keda.sh | head -3
-          else
-            echo "⚠️ keda.sh API group not available, using fallback endpoint"
-            # Try core APIs instead
-            sed -i 's|/openapi/v3/apis/keda.sh/v1alpha1|/openapi/v2|g' /rapidast-config/config.yaml
-            echo "Updated config to scan core Kubernetes API (/openapi/v2)"
-          fi
-          
-          echo "🎯 CHECKPOINT 4: About to start RapiDAST scan"
+          echo "🎯 CHECKPOINT 3: About to start RapiDAST scan"
           
           # Run RapiDAST scan with correct log level
           echo "Starting RapiDAST scan..."
-          echo "🎯 CHECKPOINT 5: RapiDAST process starting..."
+          echo "🎯 CHECKPOINT 4: RapiDAST process starting..."
           
           python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml --log-level info 2>&1 || {
             echo "⚠️ RapiDAST scan completed with errors, but continuing..."
           }
           
-          echo "🎯 CHECKPOINT 6: RapiDAST process finished"
+          echo "🎯 CHECKPOINT 5: RapiDAST process finished"
           echo "✅ RapiDAST scan completed"
-          echo "🎯 CHECKPOINT 7: About to examine results"
+          echo "🎯 CHECKPOINT 6: About to examine results"
           
           echo "Results directory structure:"
           find /opt/rapidast/results -type f 2>/dev/null | head -20
@@ -573,7 +554,7 @@ spec:
           echo "Results summary:"
           ls -la /opt/rapidast/results/
           
-          echo "🎯 CHECKPOINT 8: Results examination complete, proceeding to display step"
+          echo "🎯 CHECKPOINT 7: Results examination complete, proceeding to display step"
       - name: display-results
         image: quay.io/konflux-ci/konflux-test:latest
         volumeMounts:
@@ -583,7 +564,7 @@ spec:
           #!/bin/bash
           set -euxo pipefail
           
-          echo "🎯 CHECKPOINT 9: Display results step started"
+          echo "🎯 CHECKPOINT 8: Display results step started"
           
           echo "🔍 RapiDAST + Trivy Scan Results Summary"
           echo "========================================"
