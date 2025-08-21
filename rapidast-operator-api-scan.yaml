@@ -1,0 +1,452 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: rapidast-operator-api-scan
+  annotations:
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+    pipelinesascode.tekton.dev/on-cel-expression: |
+      event == "push" && target_branch == "main"
+spec:
+  description: |
+    DAST scan for Custom Metrics Autoscaler operator API groups using RapiDAST.
+    This pipeline scans the operator's CRDs and API endpoints directly via the cluster API server.
+  params:
+  - name: SNAPSHOT
+    type: string
+    description: The JSON string of the Snapshot object containing components to test
+  - name: NAMESPACE
+    type: string
+    default: "openshift-keda"
+    description: Namespace where the operator will be installed
+  - name: timeout
+    type: string
+    description: Timeout for the DAST scan
+    default: "600"
+  
+  tasks:
+  # Extract bundle image from snapshot
+  - name: extract-bundle-image
+    taskSpec:
+      params:
+        - name: SNAPSHOT
+          type: string
+      results:
+        - name: bundle-image
+          description: Bundle image extracted from snapshot
+      steps:
+        - name: extract-image
+          image: quay.io/konflux-ci/konflux-test:latest
+          env:
+            - name: SNAPSHOT
+              value: "$(params.SNAPSHOT)"
+          script: |
+            #!/bin/bash
+            set -euxo pipefail
+            echo "Extracting bundle image from snapshot..."
+            BUNDLE_IMAGE=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name | test(".*bundle.*|.*operator.*bundle.*"; "i")) | .containerImage' | head -1)
+            if [ -z "$BUNDLE_IMAGE" ] || [ "$BUNDLE_IMAGE" = "null" ]; then
+              BUNDLE_IMAGE=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name == "custom-metrics-autoscaler-operator-bundle") | .containerImage')
+            fi
+            if [ -z "$BUNDLE_IMAGE" ] || [ "$BUNDLE_IMAGE" = "null" ]; then
+              echo "ERROR: No bundle image found in snapshot"
+              echo "Available components:"
+              echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?)?.name' | sed 's/^/  - /'
+              exit 1
+            fi
+            echo "Found bundle image: $BUNDLE_IMAGE"
+            echo -n "$BUNDLE_IMAGE" | tee "$(results.bundle-image.path)"
+    params:
+    - name: SNAPSHOT
+      value: "$(params.SNAPSHOT)"
+
+  # Provision EaaS space
+  - name: provision-eaas-space
+    taskRef:
+      resolver: git
+      params:
+        - name: url
+          value: https://github.com/konflux-ci/build-definitions.git
+        - name: revision
+          value: main
+        - name: pathInRepo
+          value: task/eaas-provision-space/0.1/eaas-provision-space.yaml
+
+  # Create ephemeral cluster with image mirroring
+  - name: provision-cluster
+    runAfter:
+    - provision-eaas-space
+    taskSpec:
+      results:
+      - name: clusterName
+        description: Name of the ephemeral cluster
+      steps:
+      - name: pick-version
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-supported-ephemeral-cluster-versions/0.1/eaas-get-supported-ephemeral-cluster-versions.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+      - name: create-cluster
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-create-ephemeral-cluster-hypershift-aws/0.1/eaas-create-ephemeral-cluster-hypershift-aws.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: version
+          value: "$(steps.pick-version.results.version)"
+        - name: imageContentSources
+          value: |
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator-bundle
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator-bundle
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-adapter
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-adapter
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-webhooks
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-webhooks
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
+            - mirrors:
+              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-operator
+              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-operator
+              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
+        - name: clusterName
+          value: rapidast-cma-$(context.pipelineRun.name)
+
+  # Deploy the operator 
+  - name: deploy-operator
+    runAfter:
+    - provision-cluster
+    - extract-bundle-image
+    taskSpec:
+      params:
+      - name: bundle-image
+        type: string
+      - name: namespace
+        type: string
+      volumes:
+      - name: credentials
+        emptyDir: {}
+      steps:
+      - name: get-kubeconfig
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: clusterName
+          value: "$(tasks.provision-cluster.results.clusterName)"
+        - name: credentials
+          value: credentials
+      - name: create-namespace
+        image: quay.io/konflux-ci/konflux-test:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          echo "Creating namespace: $NAMESPACE"
+          oc create namespace "$NAMESPACE" --dry-run=client -o yaml | oc apply -f -
+          echo "Namespace $NAMESPACE is ready"
+      - name: deploy-operator
+        image: quay.io/operator-framework/operator-sdk:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        - name: BUNDLE_IMAGE
+          value: "$(params.bundle-image)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          echo "Deploying operator bundle: $BUNDLE_IMAGE"
+          operator-sdk run bundle "$BUNDLE_IMAGE" --namespace "$NAMESPACE" --timeout 10m
+          echo "Operator deployment completed successfully"
+    params:
+    - name: bundle-image
+      value: "$(tasks.extract-bundle-image.results.bundle-image)"
+    - name: namespace
+      value: "$(params.NAMESPACE)"
+
+  # Configure KEDA controller
+  - name: configure-keda
+    runAfter:
+    - deploy-operator
+    taskSpec:
+      params:
+      - name: namespace
+        type: string
+      volumes:
+      - name: credentials
+        emptyDir: {}
+      steps:
+      - name: get-kubeconfig
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: clusterName
+          value: "$(tasks.provision-cluster.results.clusterName)"
+        - name: credentials
+          value: credentials
+      - name: create-kedacontroller
+        image: quay.io/konflux-ci/konflux-test:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          echo "Creating KedaController instance..."
+          oc apply -f - <<EOF
+          apiVersion: keda.sh/v1alpha1
+          kind: KedaController
+          metadata:
+            name: keda
+            namespace: $NAMESPACE
+          spec:
+            metricsServer:
+              logLevel: "0"
+            operator:
+              logEncoder: console
+              logLevel: info
+            serviceAccount: {}
+            watchNamespace: ""
+          EOF
+          
+          echo "Waiting for KEDA components to be ready..."
+          timeout 300s bash -c "
+            until [ \"\$(oc get deployment -n $NAMESPACE keda-metrics-apiserver -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status}' 2>/dev/null)\" = \"True\" ]; do
+              echo -n .
+              sleep 5
+            done
+          "
+          echo " KEDA metrics-apiserver ready"
+          
+          timeout 300s bash -c "
+            until [ \"\$(oc get deployment -n $NAMESPACE keda-operator -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status}' 2>/dev/null)\" = \"True\" ]; do
+              echo -n .
+              sleep 5
+            done
+          "
+          echo " KEDA operator ready"
+          
+          echo "✅ KEDA controller is fully operational"
+    params:
+    - name: namespace
+      value: "$(params.NAMESPACE)"
+
+  # Run RapiDAST scan on the operator's API groups
+  - name: rapidast-api-scan
+    runAfter:
+    - configure-keda
+    taskSpec:
+      params:
+      - name: namespace
+        type: string
+      volumes:
+      - name: credentials
+        emptyDir: {}
+      - name: rapidast-config
+        emptyDir: {}
+      - name: rapidast-results
+        emptyDir: {}
+      steps:
+      - name: get-kubeconfig
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
+        params:
+        - name: eaasSpaceSecretRef
+          value: $(tasks.provision-eaas-space.results.secretRef)
+        - name: clusterName
+          value: "$(tasks.provision-cluster.results.clusterName)"
+        - name: credentials
+          value: credentials
+      - name: prepare-rapidast-config
+        image: quay.io/konflux-ci/konflux-test:latest
+        env:
+        - name: KUBECONFIG
+          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: rapidast-config
+          mountPath: /rapidast-config
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          # Get cluster API server URL
+          API_SERVER=$(oc whoami --show-server)
+          echo "Cluster API server: $API_SERVER"
+          
+          # Get admin token
+          BEARER_TOKEN=$(oc whoami -t)
+          echo "Got bearer token (length: ${#BEARER_TOKEN})"
+          
+          # Create RapiDAST config from template
+          cat > /rapidast-config/config.yaml << EOF
+          config:
+              configVersion: 4
+
+          application:
+            shortName: "cma-operator"
+            url: "$API_SERVER"
+
+          general:
+              authentication:
+                  type: "http_header"
+                  parameters:
+                      name: "Authorization"
+                      value: "Bearer $BEARER_TOKEN"
+              container:
+                  type: "none"
+
+          scanners:
+              zap:
+                  apiScan:
+                      apis:
+                          apiUrl: "$API_SERVER/openapi/v3/apis/keda.sh/v1alpha1"
+
+                  passiveScan:
+                      disabledRules: "2,10015,10024,10027,10054,10096,10109,10112"
+
+                  activeScan:
+                      policy: "Kubernetes-API-scan"
+
+                  miscOptions:
+                    enableUI: False
+                    updateAddons: False
+                    overrideConfigs:
+                        - formhandler.fields.field(0).fieldId=namespace   
+                        - formhandler.fields.field(0).value=$NAMESPACE
+                        - formhandler.fields.field(1).fieldId=name   
+                        - formhandler.fields.field(1).value=default
+
+                  report:
+                      format: ["json","html","sarif"]
+          EOF
+          
+          echo "✅ RapiDAST configuration prepared"
+          echo "Scanning API endpoint: $API_SERVER/openapi/v3/apis/keda.sh/v1alpha1"
+      - name: run-rapidast-scan
+        image: quay.io/redhatproductsecurity/rapidast:latest
+        volumeMounts:
+        - name: rapidast-config
+          mountPath: /rapidast-config
+        - name: rapidast-results
+          mountPath: /opt/rapidast/results
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          echo "Starting RapiDAST scan of CMA operator APIs..."
+          echo "Config file:"
+          cat /rapidast-config/config.yaml
+          echo "================================"
+          
+          # Run RapiDAST scan
+          python /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml
+          
+          echo "✅ RapiDAST scan completed"
+          echo "Results:"
+          ls -la /opt/rapidast/results/
+      - name: display-results
+        image: quay.io/konflux-ci/konflux-test:latest
+        volumeMounts:
+        - name: rapidast-results
+          mountPath: /results
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          echo "🔍 RapiDAST Scan Results Summary"
+          echo "==============================="
+          
+          if [ -f "/results/zap-baseline.json" ]; then
+            echo "📊 ZAP Baseline Results:"
+            jq -r '.issues[] | "- \(.level) \(.name): \(.desc)"' /results/zap-baseline.json | head -10
+            echo ""
+            TOTAL_ISSUES=$(jq -r '.issues | length' /results/zap-baseline.json)
+            echo "Total issues found: $TOTAL_ISSUES"
+          fi
+          
+          if [ -f "/results/zap-baseline.html" ]; then
+            echo "📄 HTML report generated: zap-baseline.html"
+          fi
+          
+          if [ -f "/results/zap-baseline.sarif" ]; then
+            echo "📄 SARIF report generated: zap-baseline.sarif"
+          fi
+          
+          echo ""
+          echo "All result files:"
+          ls -la /results/
+    params:
+    - name: namespace
+      value: "$(params.NAMESPACE)"
