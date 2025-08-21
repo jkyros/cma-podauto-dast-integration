@@ -361,9 +361,40 @@ spec:
           API_SERVER=$(oc whoami --show-server)
           echo "Cluster API server: $API_SERVER"
           
-          # Get admin token
-          BEARER_TOKEN=$(oc whoami -t)
-          echo "Got bearer token (length: ${#BEARER_TOKEN})"
+          # Create a service account and token for RapiDAST scanning
+          echo "Creating service account for RapiDAST in namespace: $NAMESPACE"
+          oc create serviceaccount rapidast-scanner -n $NAMESPACE --dry-run=client -o yaml | oc apply -f -
+          
+          # Create cluster-admin rolebinding for the service account
+          oc create clusterrolebinding rapidast-scanner-admin-$(date +%s) \
+            --clusterrole=cluster-admin \
+            --serviceaccount=$NAMESPACE:rapidast-scanner \
+            --dry-run=client -o yaml | oc apply -f -
+          
+          # Wait for the service account token to be created
+          echo "Waiting for service account token..."
+          for i in {1..30}; do
+            BEARER_TOKEN=$(oc create token rapidast-scanner -n $NAMESPACE --duration=1h 2>/dev/null || echo "")
+            if [ -n "$BEARER_TOKEN" ]; then
+              break
+            fi
+            echo -n "."
+            sleep 2
+          done
+          
+          if [ -z "$BEARER_TOKEN" ]; then
+            echo "❌ Failed to create service account token"
+            echo "Trying to extract token from kubeconfig..."
+            # Try to get token from current context (fallback)
+            BEARER_TOKEN=$(oc whoami -t 2>/dev/null || echo "")
+          fi
+          
+          if [ -n "$BEARER_TOKEN" ]; then
+            echo "✅ Got bearer token (length: ${#BEARER_TOKEN})"
+          else
+            echo "❌ No bearer token available - this may cause RapiDAST authentication to fail"
+            BEARER_TOKEN="PLACEHOLDER_TOKEN"
+          fi
           
           # Create RapiDAST config from template
           cat > /rapidast-config/config.yaml << EOF
