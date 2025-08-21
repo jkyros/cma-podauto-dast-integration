@@ -462,7 +462,7 @@ spec:
           echo "================================"
           
           # Run RapiDAST scan
-          python /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml
+          python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml
           
           echo "✅ RapiDAST scan completed"
           echo "Results:"
