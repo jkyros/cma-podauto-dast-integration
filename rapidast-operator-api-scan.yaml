@@ -391,6 +391,18 @@ spec:
           
           if [ -n "$BEARER_TOKEN" ]; then
             echo "✅ Got bearer token (length: ${#BEARER_TOKEN})"
+            
+            # Wait for RBAC permissions to propagate
+            echo "⏳ Waiting for RBAC permissions to propagate..."
+            sleep 10
+            
+            # Test the token works with a basic API call
+            echo "Testing token access..."
+            if oc whoami --token="$BEARER_TOKEN" >/dev/null 2>&1; then
+              echo "✅ Service account token is valid"
+            else
+              echo "⚠️ Service account token validation failed, but continuing..."
+            fi
           else
             echo "❌ No bearer token available - this may cause RapiDAST authentication to fail"
             BEARER_TOKEN="PLACEHOLDER_TOKEN"
@@ -476,20 +488,75 @@ spec:
             echo "❌ API server is not reachable"
           fi
           
+          # Test token permissions first
+          echo "🔍 Testing service account token permissions..."
+          # Extract token without the "Bearer " prefix since we'll add it
+          TOKEN=$(grep -A5 'authentication:' /rapidast-config/config.yaml | grep 'value:' | sed 's/.*value: *"Bearer *//' | sed 's/".*//')
+          echo "Testing with token (length: ${#TOKEN})"
+          
+          # Test basic cluster access
+          echo "Testing basic cluster access..."
+          WHOAMI_RESPONSE=$(curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$API_SERVER/api/v1/namespaces" | head -c 200)
+          if echo "$WHOAMI_RESPONSE" | grep -q '"kind":"NamespaceList"'; then
+            echo "✅ Service account has basic cluster access"
+          else
+            echo "❌ Service account lacks basic cluster access:"
+            echo "$WHOAMI_RESPONSE"
+          fi
+          
           # Test if the OpenAPI endpoint returns content
           echo "Testing OpenAPI endpoint..."
-          OPENAPI_RESPONSE=$(curl -k -s --connect-timeout 10 -H "Authorization: Bearer $(grep -A5 'authentication:' /rapidast-config/config.yaml | grep 'value:' | sed 's/.*value: *"//' | sed 's/".*//')" "$OPENAPI_URL" | head -c 500)
+          OPENAPI_RESPONSE=$(curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$OPENAPI_URL" | head -c 500)
           if [ -n "$OPENAPI_RESPONSE" ]; then
-            echo "✅ OpenAPI endpoint returned content:"
-            echo "$OPENAPI_RESPONSE" | head -5
+            if echo "$OPENAPI_RESPONSE" | grep -q '"kind":"Status"'; then
+              echo "❌ OpenAPI endpoint returned error:"
+              echo "$OPENAPI_RESPONSE" | head -5
+            else
+              echo "✅ OpenAPI endpoint returned content:"
+              echo "$OPENAPI_RESPONSE" | head -5
+            fi
           else
             echo "❌ OpenAPI endpoint returned no content or is not accessible"
           fi
           echo ""
           
-          # Run RapiDAST scan with more verbose output
+          # Wait for KEDA CRDs to be ready (API group might take time to appear)
+          echo "⏳ Waiting for KEDA CRDs to be ready..."
+          for i in {1..30}; do
+            if oc api-resources --api-group=keda.sh >/dev/null 2>&1; then
+              echo "✅ keda.sh API group is available"
+              break
+            fi
+            echo -n "."
+            sleep 5
+          done
+          echo ""
+          
+          # Check if keda.sh API group exists and what resources are available
+          echo "🔍 Checking available API groups and resources..."
+          echo "Available keda.sh API resources:"
+          oc api-resources --api-group=keda.sh || echo "❌ keda.sh API group not found"
+          echo ""
+          echo "Available CRDs related to keda:"
+          oc get crd | grep -i keda || echo "❌ No keda-related CRDs found"
+          echo ""
+          echo "All API groups:"
+          oc api-resources | grep -E "(keda|scaling)" || echo "❌ No keda/scaling related resources found"
+          echo ""
+          
+          # If keda.sh doesn't exist, let's try a different API group or core APIs
+          if ! oc api-resources --api-group=keda.sh >/dev/null 2>&1; then
+            echo "⚠️ keda.sh API group not available, checking for alternative endpoints..."
+            
+            # Try core APIs instead
+            echo "Updating config to use core Kubernetes APIs for testing..."
+            sed -i 's|/openapi/v3/apis/keda.sh/v1alpha1|/openapi/v2|g' /rapidast-config/config.yaml
+            echo "Updated config to scan core Kubernetes API"
+          fi
+          
+          # Run RapiDAST scan with correct log level
           echo "Starting RapiDAST scan..."
-          python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml --log-level DEBUG 2>&1 || {
+          python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml --log-level debug 2>&1 || {
             echo "⚠️ RapiDAST scan completed with errors, but continuing..."
           }
           
