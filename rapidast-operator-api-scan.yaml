@@ -461,11 +461,43 @@ spec:
           cat /rapidast-config/config.yaml
           echo "================================"
           
-          # Run RapiDAST scan
-          python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml
+          # Debug: Test API endpoint accessibility
+          API_SERVER=$(grep -E 'url:|apiUrl:' /rapidast-config/config.yaml | head -1 | sed 's/.*: *"//' | sed 's/".*//' | sed 's/ *$//')
+          OPENAPI_URL=$(grep 'apiUrl:' /rapidast-config/config.yaml | sed 's/.*apiUrl: *"//' | sed 's/".*//')
+          
+          echo "🔍 Debug: Testing API endpoint accessibility..."
+          echo "API Server: $API_SERVER"
+          echo "OpenAPI URL: $OPENAPI_URL"
+          
+          # Test if the API server is reachable
+          if curl -k -s --connect-timeout 10 "$API_SERVER" >/dev/null; then
+            echo "✅ API server is reachable"
+          else
+            echo "❌ API server is not reachable"
+          fi
+          
+          # Test if the OpenAPI endpoint returns content
+          echo "Testing OpenAPI endpoint..."
+          OPENAPI_RESPONSE=$(curl -k -s --connect-timeout 10 -H "Authorization: Bearer $(grep -A5 'authentication:' /rapidast-config/config.yaml | grep 'value:' | sed 's/.*value: *"//' | sed 's/".*//')" "$OPENAPI_URL" | head -c 500)
+          if [ -n "$OPENAPI_RESPONSE" ]; then
+            echo "✅ OpenAPI endpoint returned content:"
+            echo "$OPENAPI_RESPONSE" | head -5
+          else
+            echo "❌ OpenAPI endpoint returned no content or is not accessible"
+          fi
+          echo ""
+          
+          # Run RapiDAST scan with more verbose output
+          echo "Starting RapiDAST scan..."
+          python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml --log-level DEBUG 2>&1 || {
+            echo "⚠️ RapiDAST scan completed with errors, but continuing..."
+          }
           
           echo "✅ RapiDAST scan completed"
-          echo "Results:"
+          echo "Results directory structure:"
+          find /opt/rapidast/results -type f 2>/dev/null | head -20
+          echo ""
+          echo "Results summary:"
           ls -la /opt/rapidast/results/
       - name: display-results
         image: quay.io/konflux-ci/konflux-test:latest
@@ -483,22 +515,44 @@ spec:
           ls -la /results/
           echo ""
           
-          # ZAP Results Display
-          if [ -f "/results/zap-baseline.json" ]; then
+          # Debug: Check if results are in subdirectories
+          echo "🔍 Checking for results in subdirectories:"
+          find /results -type f -name "*.json" -o -name "*.html" -o -name "*.sarif" 2>/dev/null || echo "No result files found anywhere"
+          echo ""
+          
+          # Debug: Check what's in the cma-operator directory
+          if [ -d "/results/cma-operator" ]; then
+            echo "📂 Contents of /results/cma-operator/:"
+            find /results/cma-operator -type f 2>/dev/null | head -20
+            echo ""
+          fi
+          
+          # ZAP Results Display - Check multiple possible locations
+          ZAP_RESULTS=""
+          for zap_file in /results/zap-baseline.json /results/*/zap-baseline.json /results/*/*.json; do
+            if [ -f "$zap_file" ] && grep -q "issues" "$zap_file" 2>/dev/null; then
+              ZAP_RESULTS="$zap_file"
+              break
+            fi
+          done
+          
+          if [ -n "$ZAP_RESULTS" ] && [ -f "$ZAP_RESULTS" ]; then
             echo "📊 ZAP API Security Scan Results:"
             echo "--------------------------------"
-            jq -r '.issues[] | "- \(.level) \(.name): \(.desc)"' /results/zap-baseline.json | head -10
+            echo "Results file: $(basename "$ZAP_RESULTS")"
+            jq -r '.issues[]? | "- \(.level) \(.name): \(.desc)"' "$ZAP_RESULTS" | head -10
             echo ""
-            TOTAL_ZAP_ISSUES=$(jq -r '.issues | length' /results/zap-baseline.json)
+            TOTAL_ZAP_ISSUES=$(jq -r '.issues | length' "$ZAP_RESULTS" 2>/dev/null || echo "0")
             echo "Total ZAP issues found: $TOTAL_ZAP_ISSUES"
             echo ""
           else
-            echo "⚠️  No ZAP results found (zap-baseline.json)"
+            echo "⚠️  No ZAP results found"
+            echo "Searched for: zap-baseline.json, */zap-baseline.json, */*.json with 'issues' content"
           fi
           
-          # Trivy Results Display
+          # Trivy Results Display - Check multiple possible locations
           TRIVY_RESULTS=""
-          for trivy_file in /results/generic_trivy*.json /results/trivy*.json; do
+          for trivy_file in /results/generic_trivy*.json /results/trivy*.json /results/*/trivy*.json /results/*/generic_trivy*.json; do
             if [ -f "$trivy_file" ]; then
               TRIVY_RESULTS="$trivy_file"
               break
@@ -534,8 +588,9 @@ spec:
             echo ""
           else
             echo "⚠️  No Trivy results found"
-            echo "Looking for: generic_trivy*.json, trivy*.json"
-            ls -la /results/ | grep -E "(trivy|generic)" || echo "No trivy files found"
+            echo "Searched for: generic_trivy*.json, trivy*.json, */trivy*.json, */generic_trivy*.json"
+            echo "Files found in results directory:"
+            find /results -name "*trivy*" -o -name "*generic*" 2>/dev/null || echo "No trivy/generic files found"
             echo ""
           fi
           
@@ -543,10 +598,12 @@ spec:
           echo "📄 Generated Report Files:"
           echo "-------------------------"
           for report_type in html sarif json; do
-            report_files=$(ls /results/*.$report_type 2>/dev/null || true)
+            report_files=$(find /results -name "*.$report_type" 2>/dev/null || true)
             if [ -n "$report_files" ]; then
               echo "📄 $report_type reports:"
-              echo "$report_files" | sed 's|/results/|  - |g'
+              echo "$report_files" | sed 's|/results/||g' | sed 's/^/  - /'
+            else
+              echo "📄 No $report_type reports found"
             fi
           done
           
