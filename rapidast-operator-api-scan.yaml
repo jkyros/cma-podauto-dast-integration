@@ -80,6 +80,7 @@ spec:
   - name: provision-cluster
     runAfter:
     - provision-eaas-space
+    timeout: "20m"  # Allow 20 minutes for cluster provisioning
     taskSpec:
       results:
       - name: clusterName
@@ -159,6 +160,7 @@ spec:
     runAfter:
     - provision-cluster
     - extract-bundle-image
+    timeout: "30m"  # Allow 30 minutes for operator deployment
     taskSpec:
       params:
       - name: bundle-image
@@ -230,6 +232,7 @@ spec:
   - name: configure-keda
     runAfter:
     - deploy-operator
+    timeout: "15m"  # Allow 15 minutes for KEDA configuration
     taskSpec:
       params:
       - name: namespace
@@ -312,6 +315,7 @@ spec:
   - name: rapidast-api-scan
     runAfter:
     - configure-keda
+    timeout: "45m"  # Increase timeout to 45 minutes for DAST scanning
     taskSpec:
       params:
       - name: namespace
@@ -496,76 +500,80 @@ spec:
           
           # Test basic cluster access
           echo "Testing basic cluster access..."
-          WHOAMI_RESPONSE=$(curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$API_SERVER/api/v1/namespaces" | head -c 200)
-          if echo "$WHOAMI_RESPONSE" | grep -q '"kind":"NamespaceList"'; then
+          if curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$API_SERVER/api/v1/namespaces" | grep -q '"kind":"NamespaceList"' 2>/dev/null; then
             echo "✅ Service account has basic cluster access"
           else
-            echo "❌ Service account lacks basic cluster access:"
-            echo "$WHOAMI_RESPONSE"
+            echo "❌ Service account lacks basic cluster access"
           fi
+          
+          echo "🎯 CHECKPOINT 1: Basic authentication working"
           
           # Test if the OpenAPI endpoint returns content
           echo "Testing OpenAPI endpoint..."
-          OPENAPI_RESPONSE=$(curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$OPENAPI_URL" | head -c 500)
-          if [ -n "$OPENAPI_RESPONSE" ]; then
-            if echo "$OPENAPI_RESPONSE" | grep -q '"kind":"Status"'; then
-              echo "❌ OpenAPI endpoint returned error:"
-              echo "$OPENAPI_RESPONSE" | head -5
-            else
-              echo "✅ OpenAPI endpoint returned content:"
-              echo "$OPENAPI_RESPONSE" | head -5
-            fi
+          if curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$OPENAPI_URL" | grep -q '"openapi"' 2>/dev/null; then
+            echo "✅ OpenAPI endpoint returned valid content"
+          elif curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$OPENAPI_URL" | grep -q '"kind":"Status"' 2>/dev/null; then
+            echo "❌ OpenAPI endpoint returned error (likely API not available yet)"
           else
-            echo "❌ OpenAPI endpoint returned no content or is not accessible"
+            echo "❌ OpenAPI endpoint not accessible"
           fi
           echo ""
+          
+          echo "🎯 CHECKPOINT 2: OpenAPI endpoint tested"
           
           # Wait for KEDA CRDs to be ready (API group might take time to appear)
-          echo "⏳ Waiting for KEDA CRDs to be ready..."
-          for i in {1..30}; do
-            if oc api-resources --api-group=keda.sh >/dev/null 2>&1; then
+          echo "⏳ Waiting for KEDA CRDs to be ready (max 2.5min)..."
+          KEDA_FOUND=false
+          for i in {1..15}; do  # Reduced from 30 to 15 (75 seconds total)
+            echo "Attempt $i/15 - checking for keda.sh API group..."
+            if timeout 10s oc api-resources --api-group=keda.sh >/dev/null 2>&1; then
               echo "✅ keda.sh API group is available"
+              KEDA_FOUND=true
               break
             fi
-            echo -n "."
             sleep 5
           done
-          echo ""
           
-          # Check if keda.sh API group exists and what resources are available
-          echo "🔍 Checking available API groups and resources..."
-          echo "Available keda.sh API resources:"
-          oc api-resources --api-group=keda.sh || echo "❌ keda.sh API group not found"
-          echo ""
-          echo "Available CRDs related to keda:"
-          oc get crd | grep -i keda || echo "❌ No keda-related CRDs found"
-          echo ""
-          echo "All API groups:"
-          oc api-resources | grep -E "(keda|scaling)" || echo "❌ No keda/scaling related resources found"
-          echo ""
-          
-          # If keda.sh doesn't exist, let's try a different API group or core APIs
-          if ! oc api-resources --api-group=keda.sh >/dev/null 2>&1; then
-            echo "⚠️ keda.sh API group not available, checking for alternative endpoints..."
-            
-            # Try core APIs instead
-            echo "Updating config to use core Kubernetes APIs for testing..."
-            sed -i 's|/openapi/v3/apis/keda.sh/v1alpha1|/openapi/v2|g' /rapidast-config/config.yaml
-            echo "Updated config to scan core Kubernetes API"
+          if [ "$KEDA_FOUND" = "false" ]; then
+            echo "⚠️ keda.sh API group not found after waiting, continuing with fallback"
           fi
+          echo ""
+          
+          echo "🎯 CHECKPOINT 3: KEDA API group check completed"
+          
+          # Simplified API group check
+          echo "🔍 Final API group verification..."
+          if oc api-resources --api-group=keda.sh >/dev/null 2>&1; then
+            echo "✅ keda.sh API group confirmed available"
+            oc api-resources --api-group=keda.sh | head -3
+          else
+            echo "⚠️ keda.sh API group not available, using fallback endpoint"
+            # Try core APIs instead
+            sed -i 's|/openapi/v3/apis/keda.sh/v1alpha1|/openapi/v2|g' /rapidast-config/config.yaml
+            echo "Updated config to scan core Kubernetes API (/openapi/v2)"
+          fi
+          
+          echo "🎯 CHECKPOINT 4: About to start RapiDAST scan"
           
           # Run RapiDAST scan with correct log level
           echo "Starting RapiDAST scan..."
-          python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml --log-level debug 2>&1 || {
+          echo "🎯 CHECKPOINT 5: RapiDAST process starting..."
+          
+          python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml --log-level info 2>&1 || {
             echo "⚠️ RapiDAST scan completed with errors, but continuing..."
           }
           
+          echo "🎯 CHECKPOINT 6: RapiDAST process finished"
           echo "✅ RapiDAST scan completed"
+          echo "🎯 CHECKPOINT 7: About to examine results"
+          
           echo "Results directory structure:"
           find /opt/rapidast/results -type f 2>/dev/null | head -20
           echo ""
           echo "Results summary:"
           ls -la /opt/rapidast/results/
+          
+          echo "🎯 CHECKPOINT 8: Results examination complete, proceeding to display step"
       - name: display-results
         image: quay.io/konflux-ci/konflux-test:latest
         volumeMounts:
@@ -574,6 +582,8 @@ spec:
         script: |
           #!/bin/bash
           set -euxo pipefail
+          
+          echo "🎯 CHECKPOINT 9: Display results step started"
           
           echo "🔍 RapiDAST + Trivy Scan Results Summary"
           echo "========================================"
