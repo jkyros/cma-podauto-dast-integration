@@ -70,6 +70,11 @@ spec:
           value: main
         - name: pathInRepo
           value: task/eaas-provision-space/0.1/eaas-provision-space.yaml
+    params:
+    - name: ownerName
+      value: $(context.pipelineRun.name)
+    - name: ownerUid
+      value: $(context.pipelineRun.uid)
 
   # Create ephemeral cluster with image mirroring
   - name: provision-cluster
@@ -78,9 +83,9 @@ spec:
     taskSpec:
       results:
       - name: clusterName
-        description: Name of the ephemeral cluster
+        value: "$(steps.create-cluster.results.clusterName)"
       steps:
-      - name: pick-version
+      - name: get-supported-versions
         ref:
           resolver: git
           params:
@@ -93,6 +98,19 @@ spec:
         params:
         - name: eaasSpaceSecretRef
           value: $(tasks.provision-eaas-space.results.secretRef)
+      - name: pick-version
+        ref:
+          resolver: git
+          params:
+          - name: url
+            value: https://github.com/konflux-ci/build-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: stepactions/eaas-get-latest-openshift-version-by-prefix/0.1/eaas-get-latest-openshift-version-by-prefix.yaml
+        params:
+        - name: prefix
+          value: "$(steps.get-supported-versions.results.versions[0])."
       - name: create-cluster
         ref:
           resolver: git
@@ -104,39 +122,37 @@ spec:
           - name: pathInRepo
             value: stepactions/eaas-create-ephemeral-cluster-hypershift-aws/0.1/eaas-create-ephemeral-cluster-hypershift-aws.yaml
         params:
-        - name: eaasSpaceSecretRef
-          value: $(tasks.provision-eaas-space.results.secretRef)
-        - name: version
-          value: "$(steps.pick-version.results.version)"
-        - name: imageContentSources
-          value: |
-            - mirrors:
-              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator-bundle
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator-bundle
-              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
-            - mirrors:
-              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-adapter
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-adapter
-              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
-            - mirrors:
-              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-webhooks
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-webhooks
-              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
-            - mirrors:
-              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator
-              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
-            - mirrors:
-              - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-operator
-              - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-operator
-              source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
-        - name: clusterName
-          value: rapidast-cma-$(context.pipelineRun.name)
+          - name: eaasSpaceSecretRef
+            value: $(tasks.provision-eaas-space.results.secretRef)
+          - name: version
+            value: "$(steps.pick-version.results.version)"
+          - name: imageContentSources
+            value: |
+              - mirrors:
+                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator-bundle
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator-bundle
+                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
+              - mirrors:
+                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-adapter
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-adapter
+                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
+              - mirrors:
+                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-webhooks
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-webhooks
+                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
+              - mirrors:
+                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator
+                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
+              - mirrors:
+                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-operator
+                - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-operator
+                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
 
   # Deploy the operator 
   - name: deploy-operator
@@ -390,6 +406,10 @@ spec:
 
                   report:
                       format: ["json","html","sarif"]
+                      
+              generic_trivy:
+                  # Scan Kubernetes workloads for misconfigurations in the operator namespace
+                  inline: "trivy k8s --kubeconfig=$KUBECONFIG -n $NAMESPACE --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
           EOF
           
           echo "✅ RapiDAST configuration prepared"
@@ -425,28 +445,82 @@ spec:
           #!/bin/bash
           set -euxo pipefail
           
-          echo "🔍 RapiDAST Scan Results Summary"
-          echo "==============================="
+          echo "🔍 RapiDAST + Trivy Scan Results Summary"
+          echo "========================================"
           
+          echo "All result files generated:"
+          ls -la /results/
+          echo ""
+          
+          # ZAP Results Display
           if [ -f "/results/zap-baseline.json" ]; then
-            echo "📊 ZAP Baseline Results:"
+            echo "📊 ZAP API Security Scan Results:"
+            echo "--------------------------------"
             jq -r '.issues[] | "- \(.level) \(.name): \(.desc)"' /results/zap-baseline.json | head -10
             echo ""
-            TOTAL_ISSUES=$(jq -r '.issues | length' /results/zap-baseline.json)
-            echo "Total issues found: $TOTAL_ISSUES"
+            TOTAL_ZAP_ISSUES=$(jq -r '.issues | length' /results/zap-baseline.json)
+            echo "Total ZAP issues found: $TOTAL_ZAP_ISSUES"
+            echo ""
+          else
+            echo "⚠️  No ZAP results found (zap-baseline.json)"
           fi
           
-          if [ -f "/results/zap-baseline.html" ]; then
-            echo "📄 HTML report generated: zap-baseline.html"
+          # Trivy Results Display
+          TRIVY_RESULTS=""
+          for trivy_file in /results/generic_trivy*.json /results/trivy*.json; do
+            if [ -f "$trivy_file" ]; then
+              TRIVY_RESULTS="$trivy_file"
+              break
+            fi
+          done
+          
+          if [ -n "$TRIVY_RESULTS" ] && [ -f "$TRIVY_RESULTS" ]; then
+            echo "🛡️  Trivy Misconfiguration Scan Results:"
+            echo "---------------------------------------"
+            echo "Results file: $(basename "$TRIVY_RESULTS")"
+            
+            # Check if it's SARIF format (version 2.1.0) or regular Trivy JSON
+            if jq -e '.version == "2.1.0"' "$TRIVY_RESULTS" >/dev/null 2>&1; then
+              echo "📋 SARIF Format Results:"
+              TOTAL_TRIVY_ISSUES=$(jq -r '[.runs[].results[]] | length' "$TRIVY_RESULTS" 2>/dev/null || echo "0")
+              echo "Total Trivy issues found: $TOTAL_TRIVY_ISSUES"
+              if [ "$TOTAL_TRIVY_ISSUES" -gt "0" ]; then
+                echo ""
+                echo "Sample issues:"
+                jq -r '.runs[].results[] | "- \(.level // "UNKNOWN") \(.ruleId): \(.message.text)"' "$TRIVY_RESULTS" | head -5
+              fi
+            else
+              echo "📋 Trivy JSON Format Results:"
+              # Standard Trivy JSON format
+              TOTAL_TRIVY_ISSUES=$(jq -r '[.Results[]?.Misconfigurations[]?] | length' "$TRIVY_RESULTS" 2>/dev/null || echo "0")
+              echo "Total Trivy misconfigurations found: $TOTAL_TRIVY_ISSUES"
+              if [ "$TOTAL_TRIVY_ISSUES" -gt "0" ]; then
+                echo ""
+                echo "Sample misconfigurations:"
+                jq -r '.Results[]?.Misconfigurations[]? | "- \(.Severity) \(.ID): \(.Title)"' "$TRIVY_RESULTS" | head -5
+              fi
+            fi
+            echo ""
+          else
+            echo "⚠️  No Trivy results found"
+            echo "Looking for: generic_trivy*.json, trivy*.json"
+            ls -la /results/ | grep -E "(trivy|generic)" || echo "No trivy files found"
+            echo ""
           fi
           
-          if [ -f "/results/zap-baseline.sarif" ]; then
-            echo "📄 SARIF report generated: zap-baseline.sarif"
-          fi
+          # Report Files Summary
+          echo "📄 Generated Report Files:"
+          echo "-------------------------"
+          for report_type in html sarif json; do
+            report_files=$(ls /results/*.$report_type 2>/dev/null || true)
+            if [ -n "$report_files" ]; then
+              echo "📄 $report_type reports:"
+              echo "$report_files" | sed 's|/results/|  - |g'
+            fi
+          done
           
           echo ""
-          echo "All result files:"
-          ls -la /results/
+          echo "✅ Scan Results Summary Complete"
     params:
     - name: namespace
       value: "$(params.NAMESPACE)"
