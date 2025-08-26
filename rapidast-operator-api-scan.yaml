@@ -955,8 +955,8 @@ spec:
           
           cd /evidence
           
-          # Build the evidence container (uses existing Dockerfile from previous step)
-          buildah build -t "$FULL_IMAGE" -f Dockerfile .
+          # Build the evidence container with chroot isolation (avoids UID mapping issues)
+          buildah build --isolation=chroot -t "$FULL_IMAGE" -f Dockerfile .
           
           # Push to registry (uses existing QUAY push secret from Konflux)
           echo "🚀 Pushing security evidence to registry..."
