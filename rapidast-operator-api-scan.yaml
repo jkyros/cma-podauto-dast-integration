@@ -457,8 +457,8 @@ spec:
                       format: ["json","html","sarif"]
                       
               generic_trivy:
-                  # Scan Kubernetes workloads for misconfigurations in the operator namespace  
-                  inline: "export KUBECONFIG=/credentials/$KUBECONFIG_FILE && echo 'Using kubeconfig: /credentials/$KUBECONFIG_FILE' && trivy k8s --include-namespaces $NAMESPACE --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
+                  # Scan operator workloads by resource type (exclude infrastructure Jobs) + try label-based filtering
+                  inline: "export KUBECONFIG=/credentials/$KUBECONFIG_FILE && echo 'Using kubeconfig: /credentials/$KUBECONFIG_FILE' && echo 'Scanning operator workloads (excluding infrastructure jobs)...' && echo 'Deployed resources in namespace:' && kubectl get all,configmap,secret,sa,role,rolebinding -n $NAMESPACE && trivy k8s --include-namespaces $NAMESPACE --include-kinds Deployment,StatefulSet,DaemonSet,Pod,ConfigMap,Secret,Service,ServiceAccount,Role,RoleBinding,ClusterRole,ClusterRoleBinding --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
           EOF
           
           echo "✅ RapiDAST configuration prepared"
