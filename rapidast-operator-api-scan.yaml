@@ -23,6 +23,10 @@ spec:
     description: Timeout for the DAST scan
     default: "600"
   
+  workspaces:
+  - name: evidence-workspace
+    description: Workspace for building evidence container
+  
   tasks:
   # Extract bundle image from snapshot
   - name: extract-bundle-image
@@ -327,6 +331,8 @@ spec:
         emptyDir: {}
       - name: rapidast-results
         emptyDir: {}
+      workspaces:
+      - name: evidence-workspace
       steps:
       - name: get-kubeconfig
         ref:
@@ -790,8 +796,33 @@ spec:
           echo "- ZAP performed dynamic application security testing on OpenAPI endpoints"  
           echo "- Trivy performed Kubernetes misconfiguration analysis"
           echo "- All evidence above can be saved from pipeline logs for compliance documentation"
+          echo "- Container evidence package is also being built for easier cataloging"
           echo "- Scan timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo ""
+      - name: copy-results-to-workspace
+        image: quay.io/konflux-ci/konflux-test:latest
+        volumeMounts:
+        - name: rapidast-results
+          mountPath: /results
+        workspaces:
+        - name: evidence-workspace
+          mountPath: /workspace/evidence-workspace
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          echo "📋 Copying scan results to workspace for container packaging..."
+          
+          # Copy all results to workspace for the packaging task
+          if [ -d "/results" ]; then
+            cp -r /results/* /workspace/evidence-workspace/ 2>/dev/null || echo "No results to copy"
+            echo "Files copied to workspace:"
+            find /workspace/evidence-workspace -type f | head -10
+          else
+            echo "⚠️ No results directory found"
+          fi
+          
+          echo "✅ Results copied to workspace successfully"
     params:
     - name: namespace
       value: "$(params.NAMESPACE)"
@@ -800,6 +831,7 @@ spec:
   - name: package-scan-evidence
     runAfter:
     - rapidast-api-scan
+    timeout: "15m"
     taskSpec:
       params:
       - name: SNAPSHOT
@@ -809,10 +841,10 @@ spec:
       volumes:
       - name: credentials
         emptyDir: {}
-      - name: rapidast-results
+      - name: evidence-source
         emptyDir: {}
-      - name: results-evidence
-        emptyDir: {}
+      workspaces:
+      - name: evidence-workspace
       steps:
       - name: get-kubeconfig
         ref:
@@ -831,7 +863,7 @@ spec:
           value: "$(tasks.provision-cluster.results.clusterName)"
         - name: credentials
           value: credentials
-      - name: create-evidence-package
+      - name: gather-scan-results
         image: quay.io/konflux-ci/konflux-test:latest
         env:
         - name: NAMESPACE
@@ -839,147 +871,163 @@ spec:
         - name: SNAPSHOT
           value: "$(params.SNAPSHOT)"
         volumeMounts:
-        - name: results-evidence
-          mountPath: /evidence
+        - name: evidence-source
+          mountPath: /workspace/source
+        workspaces:
+        - name: evidence-workspace
+          mountPath: /workspace/evidence-workspace
         script: |
           #!/bin/bash
           set -euxo pipefail
           
-          echo "📦 Creating security evidence package..."
+          echo "📦 Gathering security scan evidence for container packaging..."
+          
+          cd /workspace/source
           
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          PIPELINE_RUN="${CONTEXT_PIPELINE_RUN_NAME:-unknown}"
+          PIPELINE_RUN="${CONTEXT_PIPELINE_RUN_NAME:-$(date +%Y%m%d-%H%M%S)}"
           
           # Extract component info from snapshot
-          COMPONENT_NAME=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name | test(".*bundle.*")) | .name' | head -1)
-          COMPONENT_IMAGE=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name | test(".*bundle.*")) | .containerImage' | head -1)
+          COMPONENT_NAME=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name | test(".*bundle.*|.*operator.*bundle.*"; "i")) | .name' | head -1)
+          COMPONENT_IMAGE=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name | test(".*bundle.*|.*operator.*bundle.*"; "i")) | .containerImage' | head -1)
           
-          # Create evidence summary
-          cat > /evidence/SECURITY_SCAN_SUMMARY.md << EOF
+          # Copy all actual scan result files from workspace (populated by previous task)
+          echo "📋 Copying scan result files from workspace..."
+          if [ -d "/workspace/evidence-workspace" ]; then
+            cp -r /workspace/evidence-workspace/* . 2>/dev/null || echo "No results files found in workspace"
+            find . -name "*.sarif" -o -name "*.json" -o -name "*.html" -o -name "*.txt" | head -10
+            echo "✅ Found $(find . -type f | wc -l) evidence files to package"
+          else
+            echo "⚠️ No evidence workspace found - container will contain only documentation"
+          fi
+          
+          # Create comprehensive evidence README
+          cat > SECURITY_SCAN_EVIDENCE.md << EOF
           # Custom Metrics Autoscaler Operator - DAST Security Scan Evidence
           
           ## Scan Information
           - **Component**: $COMPONENT_NAME  
           - **Component Image**: $COMPONENT_IMAGE
           - **Scan Type**: Dynamic Application Security Testing (DAST)
-          - **Tools Used**: OWASP ZAP + Trivy
+          - **Tools Used**: OWASP ZAP (via RapiDAST) + Trivy
           - **Scan Date**: $TIMESTAMP
           - **Pipeline Run**: $PIPELINE_RUN
           - **Target Namespace**: $NAMESPACE
           
-          ## Evidence Access Instructions
+          ## Files in this Evidence Container
           
-          ### Option 1: Pipeline Logs (Comprehensive Evidence)
-          The complete scan evidence is available in the Konflux pipeline logs:
-          1. Navigate to your Konflux pipeline run: $PIPELINE_RUN
-          2. View the "rapidast-api-scan" task logs
-          3. Scroll to the "DETAILED SECURITY SCAN EVIDENCE FOR INFORMATION SECURITY TEAM" section
-          4. Save the entire log output as evidence
+          ### Structured Results (Machine-Readable)
+          - \`**/*.sarif\`: SARIF format security scan results (industry standard)
+          - \`**/*.json\`: JSON format results for programmatic analysis
           
-          ### Option 2: Container Evidence Package  
-          This container provides a structured evidence package:
+          ### Human-Readable Reports  
+          - \`**/*.html\`: Visual HTML reports for manual review
+          - \`**/*.txt\`: Text-based scan output and logs
+          
+          ### Configuration Evidence
+          - \`**/config.yaml\`: RapiDAST configuration used (for reproducibility)
+          - \`**/rapidast-defaults.yaml\`: Default settings applied
+          
+          ## How to Extract and Review Evidence
+          
           \`\`\`bash
-          # Pull this evidence container
-          podman pull quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-\$(date +%Y%m%d)
+          # Pull the evidence container
+          podman pull quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN
+          
+          # Extract all evidence files to local directory  
+          podman run --rm -v \$(pwd)/scan-evidence:/output \\
+            quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN \\
+            sh -c "cp -r /evidence/* /output/"
           
           # View this summary
-          podman run --rm <image>
+          podman run --rm quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN
           
-          # Extract evidence files (if any were packaged)
-          podman run --rm -v \$(pwd)/evidence:/output <image> cp -r /evidence/* /output/
+          # Interactive examination
+          podman run --rm -it quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN sh
           \`\`\`
           
           ## Security Assessment Summary
-          - **ZAP API Security Scan**: Tested KEDA API endpoints for security vulnerabilities
-          - **Trivy Misconfiguration Scan**: Analyzed Kubernetes resources for misconfigurations
-          - **Coverage**: OpenAPI endpoints in openshift-keda namespace
-          - **Authentication**: Service account with cluster-admin permissions (scan-only)
+          - **ZAP API Security Scan**: Tested KEDA API endpoints via \`/openapi/v3/apis/keda.sh/v1alpha1\`
+          - **Trivy Misconfiguration Scan**: Analyzed Kubernetes operator workloads for misconfigurations
+          - **Coverage**: All operator API endpoints and deployed resources
+          - **Authentication**: Service account with cluster-admin permissions (scan-only, ephemeral cluster)
           
           ## Compliance Notes
           - Scan executed in ephemeral test environment (no production impact)
-          - All scan evidence preserved in pipeline logs
-          - Results format: SARIF (structured), JSON (machine-readable), Text (human-readable)
+          - All scan evidence preserved in structured formats
+          - Results format: SARIF (structured), JSON (machine-readable), HTML (visual), Text (logs)
           - No sensitive data exposed in scan results
+          - Container provides complete audit trail for security compliance
           
-          ## Contact
-          For questions about this security scan or evidence:
-          - Pipeline: Konflux DAST Integration Pipeline
-          - Component Owner: Custom Metrics Autoscaler Team
-          - Security Scan Framework: RapiDAST (Red Hat Product Security)
+          ## Technical Details
+          - **RapiDAST Version**: Latest (quay.io/redhatproductsecurity/rapidast:latest)
+          - **ZAP Policy**: Kubernetes-API-scan 
+          - **Trivy Scope**: Deployments, StatefulSets, ConfigMaps, Secrets, RBAC resources
+          - **API Target**: OpenShift cluster API server with KEDA operator endpoints
+          
+          ## Contact Information
+          - **Pipeline**: Konflux DAST Integration Pipeline
+          - **Component Owner**: Custom Metrics Autoscaler Team  
+          - **Security Framework**: RapiDAST (Red Hat Product Security)
+          - **Evidence Container**: This container provides complete scan evidence package
           EOF
           
-          # Create simple Dockerfile
-          cat > /evidence/Dockerfile << 'EOF'
+          # Create simple Dockerfile for evidence container
+          cat > Dockerfile << 'EOF'
           FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
           
-          # Copy evidence summary
-          COPY SECURITY_SCAN_SUMMARY.md /evidence/
+          # Install basic tools for evidence examination
+          RUN microdnf install -y jq findutils && microdnf clean all
+          
+          # Copy all evidence files
           COPY . /evidence/
           
           # Set working directory
           WORKDIR /evidence
           
-          # Labels for traceability
+          # Labels for traceability and metadata
           LABEL description="DAST Security Scan Evidence Container"
           LABEL scan.component="custom-metrics-autoscaler-operator"
           LABEL scan.tools="rapidast-zap-trivy"
           LABEL maintainer="konflux-dast-pipeline"
+          LABEL evidence.type="security-scan-results"
           
-          # Default shows the summary
-          CMD ["cat", "/evidence/SECURITY_SCAN_SUMMARY.md"]
+          # Default shows the evidence summary
+          CMD ["cat", "/evidence/SECURITY_SCAN_EVIDENCE.md"]
           EOF
           
-          echo "✅ Evidence package created successfully"
-          
-      - name: build-and-push-evidence
-        image: quay.io/buildah/stable:v1.37
-        volumeMounts:
-        - name: results-evidence
-          mountPath: /evidence
-        env:
-        - name: SNAPSHOT
-          value: "$(params.SNAPSHOT)"
-        script: |
-          #!/bin/bash
-          set -euxo pipefail
-          
-          echo "🏗️ Building security evidence container..."
-          
-          # Generate unique tag with timestamp  
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          IMAGE_NAME="quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle"
-          EVIDENCE_TAG="dast-evidence-${TIMESTAMP}"
-          FULL_IMAGE="${IMAGE_NAME}:${EVIDENCE_TAG}"
-          
-          echo "Building image: $FULL_IMAGE"
-          
-          cd /evidence
-          
-          # Build the evidence container with chroot isolation (avoids UID mapping issues)
-          buildah build --isolation=chroot -t "$FULL_IMAGE" -f Dockerfile .
-          
-          # Push to registry (uses existing QUAY push secret from Konflux)
-          echo "🚀 Pushing security evidence to registry..."
-          buildah push "$FULL_IMAGE"
-          
-          echo "✅ Security evidence container pushed successfully!"
-          echo ""
-          echo "🎯 SECURITY TEAM ACCESS INSTRUCTIONS:"
-          echo "======================================"
-          echo "Pull the evidence container:"
-          echo "  podman pull $FULL_IMAGE"
-          echo ""
-          echo "View evidence summary:"
-          echo "  podman run --rm $FULL_IMAGE"
-          echo ""  
-          echo "Extract evidence files:"
-          echo "  podman run --rm -v \$(pwd)/scan-evidence:/output $FULL_IMAGE cp -r /evidence/* /output/"
-          echo ""
-          echo "Interactive examination:"
-          echo "  podman run --rm -it $FULL_IMAGE bash"
-          echo "======================================"
+          echo "✅ Evidence package prepared successfully"
+          echo "Files prepared for container:"
+          find . -type f | head -20
     params:
     - name: SNAPSHOT
       value: "$(params.SNAPSHOT)"
     - name: namespace
       value: "$(params.NAMESPACE)"
+
+  # Build and push evidence container using Konflux standard build task
+  - name: build-evidence-container
+    runAfter:
+    - package-scan-evidence
+    timeout: "10m"
+    taskRef:
+      resolver: git
+      params:
+      - name: url
+        value: https://github.com/konflux-ci/build-definitions.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: task/buildah/0.2/buildah.yaml
+    params:
+    - name: IMAGE
+      value: "quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$(context.pipelineRun.name)"
+    - name: DOCKERFILE
+      value: "./Dockerfile"
+    - name: CONTEXT
+      value: "."
+    - name: BUILD_EXTRA_ARGS
+      value: "--label=description='DAST Security Scan Evidence Container' --label=scan.component='custom-metrics-autoscaler-operator' --label=scan.date='$(date -u +%Y%m%d)'"
+    workspaces:
+    - name: source
+      workspace: evidence-workspace
