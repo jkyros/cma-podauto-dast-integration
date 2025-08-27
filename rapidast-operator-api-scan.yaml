@@ -591,6 +591,10 @@ spec:
           
           echo "🏗️ Building evidence container with scan results..."
           
+          # Install jq for JSON parsing
+          echo "Installing jq..."
+          microdnf install -y jq
+          
           # Create build context
           BUILD_DIR="/tmp/evidence-build"
           mkdir -p "$BUILD_DIR/results"
@@ -600,12 +604,6 @@ spec:
           if [ -d "/results" ] && [ "$(ls -A /results 2>/dev/null)" ]; then
             echo "Copying scan results..."
             cp -r /results/* "$BUILD_DIR/results/" 2>/dev/null || true
-            find /results -type f | while read -r file; do
-              target_file="$BUILD_DIR/results/${file#/results/}"
-              target_dir="$(dirname "$target_file")"
-              mkdir -p "$target_dir"
-              cp "$file" "$target_file"
-            done
           else
             echo "No scan results found" > "$BUILD_DIR/results/NO_RESULTS.txt"
           fi
