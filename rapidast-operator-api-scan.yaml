@@ -327,6 +327,9 @@ spec:
         emptyDir: {}
       - name: rapidast-results
         emptyDir: {}
+      - name: registry-auth
+        secret:
+          secretName: cma-podauto-jkyros-push
       steps:
       - name: get-kubeconfig
         ref:
@@ -585,6 +588,9 @@ spec:
         volumeMounts:
         - name: rapidast-results
           mountPath: /results
+        - name: registry-auth
+          mountPath: /var/run/secrets/openshift.io/push
+          readOnly: true
         script: |
           #!/bin/bash
           set -euxo pipefail
@@ -594,6 +600,17 @@ spec:
           # Install jq for JSON parsing
           echo "Installing jq..."
           microdnf install -y jq
+          
+          # Configure registry authentication from mounted secret
+          echo "Setting up registry authentication..."
+          mkdir -p /root/.docker
+          if [ -f /var/run/secrets/openshift.io/push/.dockerconfigjson ]; then
+            cp /var/run/secrets/openshift.io/push/.dockerconfigjson /root/.docker/config.json
+            echo "✅ Registry credentials configured"
+          else
+            echo "⚠️ Registry secret not found - trying without auth"
+            ls -la /var/run/secrets/openshift.io/push/ || echo "Push secret mount not found"
+          fi
           
           # Create build context
           BUILD_DIR="/tmp/evidence-build"
@@ -669,14 +686,25 @@ spec:
           echo "✅ Build context created:"
           ls -la "$BUILD_DIR"
           
-          # Build container with buildah
+          # Build container with buildah (OpenShift-compatible flags)
           IMAGE_NAME="quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN"
           echo "🏗️ Building image: $IMAGE_NAME"
           
-          buildah build --isolation=chroot -t "$IMAGE_NAME" -f Dockerfile .
+          # Use rootless buildah with OpenShift-friendly options
+          buildah build \
+            --isolation=chroot \
+            --storage-driver=vfs \
+            --security-opt label=disable \
+            --cap-drop=ALL \
+            -t "$IMAGE_NAME" \
+            -f Dockerfile .
           
           echo "🚀 Pushing evidence container..."
-          buildah push "$IMAGE_NAME"
+          buildah push \
+            --storage-driver=vfs \
+            --security-opt label=disable \
+            --authfile=/root/.docker/config.json \
+            "$IMAGE_NAME"
           
           echo "✅ Evidence container built and pushed successfully!"
           echo ""
