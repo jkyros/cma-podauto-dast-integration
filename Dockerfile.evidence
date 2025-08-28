@@ -1,0 +1,24 @@
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+# Install basic utilities for evidence examination
+RUN microdnf install -y findutils jq && microdnf clean all
+
+# Create evidence directory
+RUN mkdir -p /evidence
+
+# Add some dummy evidence files (for testing)
+RUN echo '{"test": "evidence", "created": "'$(date)'"}' > /evidence/test-evidence.json
+RUN echo "# Test Evidence Container\n\nThis is a test evidence container built with Konflux buildah-oci-ta." > /evidence/README.md
+
+# Set working directory
+WORKDIR /evidence
+
+# Add metadata labels
+LABEL description="Security scan evidence container (test)"
+LABEL evidence.format="json"
+LABEL scan.tools="test"
+LABEL build.pipeline="konflux-evidence-test"
+LABEL build.method="buildah-oci-ta"
+
+# Default command shows available files
+CMD ["find", "/evidence", "-type", "f", "-exec", "echo", "Evidence file: {}", ";"]
