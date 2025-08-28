@@ -3,26 +3,25 @@ kind: Pipeline
 metadata:
   name: push-oci-artifact-inline-run
 spec:
-  pipelineSpec:
-    tasks:
-      - name: push-artifact
-        taskSpec:
-          steps:
-            - name: add-file-and-push
-              image: quay.io/konflux-ci/oras:latest
-              script: |
-                echo "Sample artifact content" > artifact.txt
-                oras push quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:latest artifact.txt:text/plain
-              env:
-                - name: DOCKER_CONFIG
-                  value: /tekton/home/.docker/
-              volumeMounts:
-                - name: jkyros-quay-push
-                  mountPath: /tekton/home/.docker/
-          volumes:
-            - name: jkyros-quay-push
-              secret:
-                secretName: cma-podauto-jkyros-push
-                items:
-                  - key: .dockerconfigjson
-                    path: config.json
+  tasks:
+    - name: push-artifact
+      taskSpec:
+        steps:
+          - name: add-file-and-push
+            image: quay.io/konflux-ci/oras:latest
+            script: |
+              echo "Sample artifact content" > artifact.txt
+              oras push quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:latest artifact.txt:text/plain
+            env:
+              - name: DOCKER_CONFIG
+                value: /tekton/home/.docker/
+            volumeMounts:
+              - name: jkyros-quay-push
+                mountPath: /tekton/home/.docker/
+        volumes:
+          - name: jkyros-quay-push
+            secret:
+              secretName: cma-podauto-jkyros-push
+              items:
+                - key: .dockerconfigjson
+                  path: config.json
