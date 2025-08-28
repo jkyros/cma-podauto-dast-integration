@@ -8,147 +8,66 @@ metadata:
       event == "push" && target_branch == "test-simple-evidence"
 spec:
   description: |
-    Step 1: Just test creating evidence files and preparing build context.
-    No container building yet - just verify file creation works.
+    Step 2: Create evidence files AND build container using Konflux buildah-oci-ta.
+    Now that file creation works, add proven container build pattern.
   params:
   - name: test-name
     type: string
-    default: "evidence-files-test"
+    default: "evidence-container-build"
+  - name: output-image
+    type: string
+    default: "quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle"
+  - name: image-expires-after
+    type: string
+    default: "6h"
   tasks:
   
-  - name: create-evidence-files
+  # Clone repository to get build context (includes Dockerfile.evidence)
+  - name: clone-source
     timeout: "10m"
-    taskSpec:
+    taskRef:
+      resolver: bundles
       params:
-      - name: testName
-        type: string
-      steps:
-      - name: create-files
-        image: quay.io/konflux-ci/konflux-test:latest
-        script: |
-          #!/bin/bash
-          set -euxo pipefail
-          
-          echo "📝 Testing evidence file creation for: $(params.testName)"
-          
-          # Create evidence directory structure
-          mkdir -p /tmp/evidence/results
-          cd /tmp/evidence
-          
-          # Create dummy scan results (SARIF format)
-          cat > results/zap-scan.sarif << 'EOF'
-          {
-            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-            "version": "2.1.0",
-            "runs": [{
-              "tool": {
-                "driver": {
-                  "name": "ZAP",
-                  "version": "test"
-                }
-              },
-              "results": [{
-                "ruleId": "test-rule",
-                "level": "note",
-                "message": {
-                  "text": "Test security scan result"
-                }
-              }]
-            }]
-          }
-          EOF
-          
-          # Create dummy Trivy results
-          cat > results/trivy-misconfig.json << 'EOF'
-          {
-            "SchemaVersion": 2,
-            "ArtifactName": "test-cluster",
-            "Results": [{
-              "Target": "test-deployment",
-              "Class": "config", 
-              "Misconfigurations": [{
-                "ID": "TEST-001",
-                "Title": "Test misconfiguration",
-                "Description": "Test finding for evidence container",
-                "Severity": "MEDIUM"
-              }]
-            }]
-          }
-          EOF
-          
-          # Create evidence summary
-          cat > SCAN_EVIDENCE.md << EOF
-          # Security Scan Evidence
-          
-          **Test Run**: $(params.testName)
-          **Pipeline**: $(context.pipelineRun.name) 
-          **Timestamp**: $(date -u)
-          
-          ## Evidence Files
-          - \`results/zap-scan.sarif\` - Security scan results (SARIF format)
-          - \`results/trivy-misconfig.json\` - Configuration scan results
-          - \`SCAN_EVIDENCE.md\` - This summary document
-          
-          ## Usage
-          These files contain security scan evidence for compliance review.
-          EOF
-          
-          echo "✅ Evidence files created successfully!"
-          echo ""
-          echo "📂 Directory structure:"
-          find . -type f -exec echo "  {}" \;
-          
-          echo ""
-          echo "📊 File sizes:" 
-          find . -type f -exec ls -lh {} \;
-          
-          echo ""
-          echo "✅ Evidence creation test PASSED"
-          
+      - name: name
+        value: git-clone-oci-ta
+      - name: bundle
+        value: quay.io/konflux-ci/tekton-catalog/task-git-clone-oci-ta:0.1@sha256:be82c55346e8810bd1edc5547f864064da6945979baccca7dfc99990b392a02b
+      - name: kind
+        value: task
     params:
-    - name: testName
-      value: "$(params.test-name)"
+    - name: url
+      value: "https://github.com/jkyros/cma-podauto-dast-integration.git"
+    - name: revision
+      value: "main"
+    - name: ociStorage
+      value: "$(params.output-image).git"
+    - name: ociArtifactExpiresAfter
+      value: "$(params.image-expires-after)"
   
-  # If file creation works, we can add container build in next iteration
-  - name: prepare-for-container-build
+  # Build evidence container using proven Konflux buildah-oci-ta task
+  - name: build-evidence-container
     runAfter:
-    - create-evidence-files
-    taskSpec:
-      steps:
-      - name: create-dockerfile
-        image: quay.io/konflux-ci/konflux-test:latest
-        script: |
-          #!/bin/bash
-          set -euxo pipefail
-          
-          echo "📦 Preparing Dockerfile for evidence container..."
-          
-          # Create simple Dockerfile that would work with evidence files
-          cat > /tmp/Dockerfile << 'EOF'
-          FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
-          
-          # Create evidence directory
-          RUN mkdir -p /evidence
-          
-          # Copy evidence files (when they exist in build context)
-          # COPY results/ /evidence/results/
-          # COPY SCAN_EVIDENCE.md /evidence/
-          
-          WORKDIR /evidence
-          
-          # Metadata labels
-          LABEL description="Security scan evidence container"
-          LABEL evidence.format="sarif-and-json"
-          LABEL scan.tools="zap-trivy"
-          
-          # Default command
-          CMD ["echo", "Evidence container ready - add COPY commands to include files"]
-          EOF
-          
-          echo "✅ Dockerfile template created:"
-          echo ""
-          cat /tmp/Dockerfile
-          
-          echo ""
-          echo "✅ Build preparation test PASSED"
-          echo "📝 Next step: Add actual container build with Konflux buildah-oci-ta"
+    - clone-source
+    taskRef:
+      resolver: bundles
+      params:
+      - name: name
+        value: buildah-oci-ta
+      - name: bundle
+        value: quay.io/konflux-ci/tekton-catalog/task-buildah-oci-ta:0.4@sha256:d78d8abba7a84faa391d8b3b23be49ad8c09e9b1c0cabaed3919f64100cead2d
+      - name: kind
+        value: task
+    params:
+    - name: IMAGE
+      value: "$(params.output-image):evidence-test-$(context.pipelineRun.name)"
+    - name: DOCKERFILE
+      value: "Dockerfile.evidence"
+    - name: CONTEXT
+      value: "."
+    - name: HERMETIC
+      value: "false"
+    - name: IMAGE_EXPIRES_AFTER
+      value: "$(params.image-expires-after)"
+    - name: SOURCE_ARTIFACT
+      value: "$(tasks.clone-source.results.SOURCE_ARTIFACT)"
+    # buildah-oci-ta handles authentication automatically in Konflux
