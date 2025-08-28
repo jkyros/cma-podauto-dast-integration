@@ -1,239 +1,28 @@
 apiVersion: tekton.dev/v1
-kind: Pipeline
+kind: PipelineRun
 metadata:
-  name: simple-evidence-test-oras
-  annotations:
-    pipelinesascode.tekton.dev/max-keep-runs: "3"
-    pipelinesascode.tekton.dev/on-cel-expression: |
-      event == "push" && target_branch == "test-simple-evidence"
+  name: push-oci-artifact-inline-run
 spec:
-  description: |
-    Simple test pipeline: Create evidence files and push them as OCI artifact using ORAS.
-    Back to basics - no container builds, just push scan results directly.
-  params:
-  - name: test-name
-    type: string
-    default: "oras-evidence-test"
-  - name: output-image
-    type: string
-    default: "quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle"
-  - name: artifact-expires-after
-    type: string
-    default: "6h"
-  tasks:
-  
-  # Create dummy evidence files and push them with ORAS (all in one task)
-  - name: create-and-push-evidence
-    timeout: "15m"
-    taskSpec:
-      params:
-      - name: testName
-        type: string
-      - name: outputImage
-        type: string
-      - name: expiresAfter
-        type: string
-      volumes:
-      - name: results-volume
-        emptyDir: {}
-      - name: registry-auth
-        secret:
-          secretName: cma-podauto-jkyros-push
-      steps:
-      - name: generate-scan-results
-        image: quay.io/konflux-ci/konflux-test:latest
-        volumeMounts:
-        - name: results-volume
-          mountPath: /results
-        script: |
-          #!/bin/bash
-          set -euxo pipefail
-          
-          echo "📝 Creating dummy scan evidence for: $(params.testName)"
-          
-          # Create results directory structure
-          mkdir -p /results/cma-operator/scans
-          
-          # Create SARIF format ZAP results
-          cat > /results/cma-operator/scans/zap-api-scan.sarif << 'EOF'
-          {
-            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-            "version": "2.1.0",
-            "runs": [{
-              "tool": {
-                "driver": {
-                  "name": "OWASP ZAP",
-                  "version": "2.14.0",
-                  "informationUri": "https://owasp.org/www-project-zap/"
-                }
-              },
-              "results": [{
-                "ruleId": "10109",
-                "level": "note", 
-                "message": {
-                  "text": "Modern Web Application detected. This is an informational alert."
-                },
-                "locations": [{
-                  "physicalLocation": {
-                    "artifactLocation": {
-                      "uri": "https://example.com/openapi/v3/apis/keda.sh/v1alpha1"
-                    }
-                  }
-                }]
-              }]
-            }]
-          }
-          EOF
-          
-          # Create Trivy misconfiguration results  
-          cat > /results/cma-operator/scans/trivy-k8s-misconfig.json << 'EOF'
-          {
-            "SchemaVersion": 2,
-            "ArtifactName": "Cluster",
-            "ArtifactType": "kubernetes",
-            "Results": [{
-              "Target": "openshift-keda/custom-metrics-autoscaler-operator-deployment",
-              "Class": "config",
-              "Type": "kubernetes",
-              "Misconfigurations": [{
-                "Type": "Kubernetes Security Check",
-                "ID": "KSV012",
-                "AVDID": "AVD-KSV-0012",
-                "Title": "Runs as root user",
-                "Description": "The container should not run as root user",
-                "Message": "Container 'operator' should not run as root",
-                "Namespace": "builtin.kubernetes.KSV012",
-                "Query": "data.builtin.kubernetes.KSV012.deny",
-                "Resolution": "Set 'securityContext.runAsNonRoot' to true",
-                "Severity": "MEDIUM",
-                "PrimaryURL": "https://avd.aquasec.com/misconfig/ksv012",
-                "Status": "FAIL"
-              }]
-            }]
-          }
-          EOF
-          
-          # Create evidence summary  
-          cat > /results/SCAN_EVIDENCE.md << EOF
-          # DAST Scan Evidence - $(params.testName)
-          
-          **Pipeline Run**: $(context.pipelineRun.name)
-          **Timestamp**: $(date -u)
-          **Method**: ORAS OCI Artifact Push
-          **Target Operator**: Custom Metrics Autoscaler
-          
-          ## Files Included
-          
-          - \`cma-operator/scans/zap-api-scan.sarif\` - OWASP ZAP API security scan (SARIF format)
-          - \`cma-operator/scans/trivy-k8s-misconfig.json\` - Trivy Kubernetes misconfiguration scan
-          - \`SCAN_EVIDENCE.md\` - This summary document
-          
-          ## Artifact Information
-          
-          **Registry**: quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle  
-          **Tag**: evidence-$(context.pipelineRun.name)
-          **Type**: OCI Artifact (not container image)
-          **Format**: application/vnd.oci.image.manifest.v1+json
-          
-          ## Usage
-          
-          \`\`\`bash
-          # Pull evidence artifact (requires ORAS)
-          oras pull quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:evidence-$(context.pipelineRun.name)
-          
-          # Or copy from OCI registry
-          skopeo copy --src-tls-verify=false \\
-            oci:quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:evidence-$(context.pipelineRun.name) \\
-            dir:./scan-evidence
-          \`\`\`
-          
-          ## Security Evidence Chain
-          
-          This artifact contains security scan results for compliance auditing.
-          Generated by Konflux CI/CD DAST integration pipeline.
-          EOF
-          
-          echo ""
-          echo "✅ Evidence files created successfully!"
-          echo ""
-          echo "📂 Results structure:"
-          find /results -type f -exec echo "  {}" \;
-          
-          echo ""
-          echo "📊 File sizes:"
-          find /results -type f -exec ls -lh {} \;
-          
-      - name: oras-push
-        image: quay.io/konflux-ci/konflux-test:latest
-        env:
-        - name: IMAGE_URL
-          value: "$(params.outputImage):evidence-$(context.pipelineRun.name)"
-        - name: EXPIRES_AFTER
-          value: "$(params.expiresAfter)"
-        volumeMounts:
-        - name: results-volume
-          mountPath: /results
-        - name: registry-auth
-          mountPath: /auth
-        script: |
-          #!/bin/bash
-          set -euxo pipefail
-          
-          echo "🚀 Pushing evidence artifact with ORAS..."
-          echo "Target: $IMAGE_URL"
-          echo "Expires: $EXPIRES_AFTER"
-          
-          # Configure registry authentication
-          if [ -f /auth/.dockerconfigjson ]; then
-            echo "📝 Setting up registry authentication..."
-            mkdir -p ~/.docker
-            cp /auth/.dockerconfigjson ~/.docker/config.json
-          fi
-          
-          # Install ORAS CLI (if not available)
-          if ! command -v oras &> /dev/null; then
-            echo "📦 Installing ORAS CLI..."
-            curl -LO "https://github.com/oras-project/oras/releases/download/v1.1.0/oras_1.1.0_linux_amd64.tar.gz"
-            tar -xzf oras_1.1.0_linux_amd64.tar.gz
-            chmod +x oras
-            mv oras /usr/local/bin/
-          fi
-          
-          # Verify ORAS installation
-          oras version
-          
-          echo ""
-          echo "📂 Files to push:"
-          find /results -type f -exec echo "  {}" \;
-          
-          cd /results
-          
-          echo ""
-          echo "🎯 Pushing evidence artifact..."
-          
-          # Push all files in /results as an OCI artifact
-          oras push "$IMAGE_URL" \
-            --artifact-type application/vnd.cma.dast.evidence.v1+tar \
-            --annotation "org.opencontainers.image.title=DAST Evidence" \
-            --annotation "org.opencontainers.image.description=Security scan evidence from CMA operator DAST pipeline" \
-            --annotation "org.opencontainers.image.expires=$EXPIRES_AFTER" \
-            --annotation "evidence.pipeline=$(context.pipelineRun.name)" \
-            --annotation "evidence.timestamp=$(date -u)" \
-            --annotation "evidence.format=sarif-json" \
-            --annotation "evidence.tools=zap-trivy" \
-            $(find . -type f -printf '%P ')
-          
-          echo ""
-          echo "✅ Evidence artifact pushed successfully!"
-          echo "📍 Location: $IMAGE_URL"
-          echo ""
-          echo "🔍 To retrieve evidence:"
-          echo "  oras pull $IMAGE_URL"
-          
-    params:
-    - name: testName
-      value: "$(params.test-name)"
-    - name: outputImage
-      value: "$(params.output-image)"
-    - name: expiresAfter
-      value: "$(params.artifact-expires-after)"
+  pipelineSpec:
+    tasks:
+      - name: push-artifact
+        taskSpec:
+          steps:
+            - name: add-file-and-push
+              image: quay.io/konflux-ci/oras:latest
+              script: |
+                echo "Sample artifact content" > artifact.txt
+                oras push quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:latest artifact.txt:text/plain
+              env:
+                - name: DOCKER_CONFIG
+                  value: /tekton/home/.docker/
+              volumeMounts:
+                - name: jkyros-quay-push
+                  mountPath: /tekton/home/.docker/
+          volumes:
+            - name: jkyros-quay-push
+              secret:
+                secretName: cma-podauto-jkyros-push
+                items:
+                  - key: .dockerconfigjson
+                    path: config.json
