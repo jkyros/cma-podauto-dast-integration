@@ -330,6 +330,9 @@ spec:
       - name: registry-auth
         secret:
           secretName: cma-podauto-jkyros-push
+          items:
+          - key: .dockerconfigjson
+            path: config.json
       steps:
       - name: get-kubeconfig
         ref:
@@ -578,146 +581,128 @@ spec:
           
           echo "✅ Scan Results Available and displayed above"
           echo ""
-      - name: build-evidence-container
-        image: quay.io/buildah/stable:v1.37
+      - name: push-evidence-artifact
+        image: quay.io/konflux-ci/oras:latest
         env:
         - name: SNAPSHOT
           value: "$(params.SNAPSHOT)"
         - name: NAMESPACE
           value: "$(params.namespace)"
+        - name: DOCKER_CONFIG
+          value: /tekton/home/.docker/
         volumeMounts:
         - name: rapidast-results
           mountPath: /results
         - name: registry-auth
-          mountPath: /var/run/secrets/openshift.io/push
-          readOnly: true
+          mountPath: /tekton/home/.docker/
         script: |
           #!/bin/bash
           set -euxo pipefail
           
-          echo "🏗️ Building evidence container with scan results..."
+          echo "📦 Pushing DAST scan results as OCI artifact..."
           
-          # Install jq for JSON parsing
-          echo "Installing jq..."
-          microdnf install -y jq
+          PIPELINE_RUN="$(context.pipelineRun.name)"
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          ARTIFACT_URL="quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN"
           
-          # Configure registry authentication from mounted secret
-          echo "Setting up registry authentication..."
-          mkdir -p /root/.docker
-          if [ -f /var/run/secrets/openshift.io/push/.dockerconfigjson ]; then
-            cp /var/run/secrets/openshift.io/push/.dockerconfigjson /root/.docker/config.json
-            echo "✅ Registry credentials configured"
-          else
-            echo "⚠️ Registry secret not found - trying without auth"
-            ls -la /var/run/secrets/openshift.io/push/ || echo "Push secret mount not found"
-          fi
+          echo "Target artifact: $ARTIFACT_URL"
+          echo "Scan timestamp: $TIMESTAMP"
           
-          # Create build context
-          BUILD_DIR="/tmp/evidence-build"
-          mkdir -p "$BUILD_DIR/results"
-          cd "$BUILD_DIR"
+          # Prepare evidence files
+          EVIDENCE_DIR="/tmp/evidence"
+          mkdir -p "$EVIDENCE_DIR"
+          cd "$EVIDENCE_DIR"
           
-          # Copy scan results
+          # Copy scan results 
           if [ -d "/results" ] && [ "$(ls -A /results 2>/dev/null)" ]; then
             echo "Copying scan results..."
-            cp -r /results/* "$BUILD_DIR/results/" 2>/dev/null || true
+            cp -r /results/* . 2>/dev/null || true
+            echo "✅ Scan results copied"
           else
-            echo "No scan results found" > "$BUILD_DIR/results/NO_RESULTS.txt"
+            echo "⚠️ No scan results found, creating placeholder..."
+            echo "No scan results generated" > NO_SCAN_RESULTS.txt
           fi
           
-          # Create evidence documentation
-          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          PIPELINE_RUN="$(context.pipelineRun.name)"
-          COMPONENT_NAME=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name | test(".*bundle.*|.*operator.*bundle.*"; "i")) | .name' | head -1)
+          # Create evidence summary
+          cat > DAST_SCAN_EVIDENCE.md << EOF
+          # DAST Security Scan Evidence
           
-          cat > SECURITY_SCAN_EVIDENCE.md << EOF
-          # CMA Operator - DAST Security Scan Evidence
-          
-          **Scan Date**: $TIMESTAMP  
-          **Pipeline**: $PIPELINE_RUN  
-          **Component**: $COMPONENT_NAME
+          **Component**: Custom Metrics Autoscaler Operator
+          **Scan Timestamp**: $TIMESTAMP
+          **Pipeline Run**: $PIPELINE_RUN
           **Namespace**: $NAMESPACE
+          **Evidence Format**: OCI Artifact (not container image)
           
-          ## Evidence Contents
-          - ZAP scan results (SARIF, JSON, HTML formats)
-          - Trivy misconfiguration findings (JSON format)
-          - RapiDAST configuration (YAML)
-          - Complete scan logs and outputs
+          ## Contents
           
-          ## Access Instructions
+          This artifact contains security scan evidence from RapiDAST DAST integration:
+          
+          - **ZAP API Scan Results**: SARIF, JSON, and HTML formats
+          - **Trivy K8s Misconfiguration**: JSON format with policy violations
+          - **Scan Configuration**: RapiDAST YAML configuration used
+          - **This Summary**: Evidence documentation and access instructions
+          
+          ## Usage Instructions
+          
           \`\`\`bash
-          # Pull evidence container
-          podman pull quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN
+          # Pull evidence artifact (requires ORAS CLI)
+          oras pull $ARTIFACT_URL
           
-          # View summary
-          podman run --rm quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN
+          # Alternative: Use skopeo to copy artifact
+          skopeo copy --src-tls-verify=false \\
+            oci:$ARTIFACT_URL \\
+            dir:./dast-evidence-$PIPELINE_RUN
           
-          # Extract all evidence files
-          podman run --rm -v \$(pwd)/evidence:/output quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN cp -r /evidence /output/
-          
-          # Interactive examination
-          podman run --rm -it quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN bash
+          # List all evidence files
+          find . -name "*.sarif" -o -name "*.json" -o -name "*.html" -o -name "*.yaml" -o -name "*.md"
           \`\`\`
+          
+          ## Evidence Chain
+          
+          Generated by Konflux CI/CD DAST integration pipeline.
+          Scan target: OpenShift KEDA operator API groups (keda.sh/v1alpha1).
+          Tools: RapiDAST (ZAP + Trivy), Konflux CI, OpenShift EaaS.
           EOF
           
-          # Create Dockerfile
-          cat > Dockerfile << 'EOF'
-          FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+          echo "📋 Evidence summary created"
+          echo ""
+          echo "📂 Files to include in artifact:"
+          find . -type f | sort
           
-          # Install tools for evidence examination
-          RUN microdnf install -y jq findutils && microdnf clean all
+          echo ""
+          echo "📊 Evidence file sizes:"
+          find . -type f -exec ls -lh {} \;
           
-          # Copy evidence
-          RUN mkdir -p /evidence
-          COPY results/ /evidence/results/
-          COPY SECURITY_SCAN_EVIDENCE.md /evidence/
+          echo ""
+          echo "🚀 Pushing evidence artifact with ORAS..."
           
-          WORKDIR /evidence
+          # Push all evidence files as OCI artifact
+          oras push "$ARTIFACT_URL" \
+            --artifact-type application/vnd.cma.dast.evidence.v1+files \
+            --annotation "org.opencontainers.image.title=CMA Operator DAST Evidence" \
+            --annotation "org.opencontainers.image.description=Security scan evidence from Custom Metrics Autoscaler operator DAST pipeline" \
+            --annotation "org.opencontainers.image.source=konflux-dast-pipeline" \
+            --annotation "evidence.component=custom-metrics-autoscaler-operator" \
+            --annotation "evidence.pipeline=$PIPELINE_RUN" \
+            --annotation "evidence.timestamp=$TIMESTAMP" \
+            --annotation "evidence.namespace=$NAMESPACE" \
+            --annotation "evidence.tools=rapidast-zap-trivy" \
+            --annotation "evidence.format=sarif-json-html-yaml" \
+            $(find . -type f -printf '%P:application/octet-stream ')
           
-          # Labels for traceability
-          LABEL description="DAST Security Scan Evidence"
-          LABEL scan.component="custom-metrics-autoscaler-operator"
-          LABEL scan.tools="rapidast-zap-trivy"
-          LABEL scan.pipeline="konflux-dast-integration"
-          
-          CMD ["cat", "/evidence/SECURITY_SCAN_EVIDENCE.md"]
-          EOF
-          
-          echo "✅ Build context created:"
-          ls -la "$BUILD_DIR"
-          
-          # Build container with buildah (OpenShift-compatible flags)
-          IMAGE_NAME="quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN"
-          echo "🏗️ Building image: $IMAGE_NAME"
-          
-          # Use rootless buildah with OpenShift-friendly options
-          buildah build \
-            --isolation=chroot \
-            --storage-driver=vfs \
-            --security-opt label=disable \
-            --cap-drop=ALL \
-            -t "$IMAGE_NAME" \
-            -f Dockerfile .
-          
-          echo "🚀 Pushing evidence container..."
-          buildah push \
-            --storage-driver=vfs \
-            --security-opt label=disable \
-            --authfile=/root/.docker/config.json \
-            "$IMAGE_NAME"
-          
-          echo "✅ Evidence container built and pushed successfully!"
+          echo ""
+          echo "✅ DAST evidence artifact pushed successfully!"
           echo ""
           echo "🎯 SECURITY TEAM ACCESS INSTRUCTIONS:"
           echo "======================================"
-          echo "Pull the evidence container:"
-          echo "  podman pull $IMAGE_NAME"
+          echo "Pull the evidence artifact:"
+          echo "  oras pull $ARTIFACT_URL"
           echo ""
-          echo "View evidence summary:"
-          echo "  podman run --rm $IMAGE_NAME"
+          echo "Alternative download method:"
+          echo "  skopeo copy oci:$ARTIFACT_URL dir:./dast-evidence-$PIPELINE_RUN"
           echo ""
-          echo "Extract all evidence files:"
-          echo "  podman run --rm -v \$(pwd)/scan-evidence:/output $IMAGE_NAME cp -r /evidence /output/"
+          echo "Find evidence files:"
+          echo "  find . -name '*.sarif' -o -name '*.json' -o -name '*.html'"
           echo "======================================"
     params:
     - name: namespace
