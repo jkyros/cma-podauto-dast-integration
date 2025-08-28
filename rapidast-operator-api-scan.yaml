@@ -612,8 +612,9 @@ spec:
           EOF
           
           # Create tarball of all results
-          cd /results
-          tar -czf "dast-evidence-$PIPELINE_RUN.tar.gz" . 2>/dev/null || echo "Empty results"
+          tar -czf "dast-evidence-$PIPELINE_RUN.tar.gz" results/ 2>/dev/null || echo "Empty results"
+          # Move the tarball into the directory so the next step can share it 
+          mv "dast-evidence-$PIPELINE_RUN.tar.gz" results/dast-evidence-$PIPELINE_RUN.tar.gz
           
           echo "✅ Tarball created: dast-evidence-$PIPELINE_RUN.tar.gz"
           ls -lh "dast-evidence-$PIPELINE_RUN.tar.gz"
