@@ -1,0 +1,154 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: simple-evidence-test
+  annotations:
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+    pipelinesascode.tekton.dev/on-cel-expression: |
+      event == "push" && target_branch == "test-simple-evidence"
+spec:
+  description: |
+    Step 1: Just test creating evidence files and preparing build context.
+    No container building yet - just verify file creation works.
+  params:
+  - name: test-name
+    type: string
+    default: "evidence-files-test"
+  tasks:
+  
+  - name: create-evidence-files
+    timeout: "10m"
+    taskSpec:
+      params:
+      - name: testName
+        type: string
+      steps:
+      - name: create-files
+        image: quay.io/konflux-ci/konflux-test:latest
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          echo "📝 Testing evidence file creation for: $(params.testName)"
+          
+          # Create evidence directory structure
+          mkdir -p /tmp/evidence/results
+          cd /tmp/evidence
+          
+          # Create dummy scan results (SARIF format)
+          cat > results/zap-scan.sarif << 'EOF'
+          {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+              "tool": {
+                "driver": {
+                  "name": "ZAP",
+                  "version": "test"
+                }
+              },
+              "results": [{
+                "ruleId": "test-rule",
+                "level": "note",
+                "message": {
+                  "text": "Test security scan result"
+                }
+              }]
+            }]
+          }
+          EOF
+          
+          # Create dummy Trivy results
+          cat > results/trivy-misconfig.json << 'EOF'
+          {
+            "SchemaVersion": 2,
+            "ArtifactName": "test-cluster",
+            "Results": [{
+              "Target": "test-deployment",
+              "Class": "config", 
+              "Misconfigurations": [{
+                "ID": "TEST-001",
+                "Title": "Test misconfiguration",
+                "Description": "Test finding for evidence container",
+                "Severity": "MEDIUM"
+              }]
+            }]
+          }
+          EOF
+          
+          # Create evidence summary
+          cat > SCAN_EVIDENCE.md << EOF
+          # Security Scan Evidence
+          
+          **Test Run**: $(params.testName)
+          **Pipeline**: $(context.pipelineRun.name) 
+          **Timestamp**: $(date -u)
+          
+          ## Evidence Files
+          - \`results/zap-scan.sarif\` - Security scan results (SARIF format)
+          - \`results/trivy-misconfig.json\` - Configuration scan results
+          - \`SCAN_EVIDENCE.md\` - This summary document
+          
+          ## Usage
+          These files contain security scan evidence for compliance review.
+          EOF
+          
+          echo "✅ Evidence files created successfully!"
+          echo ""
+          echo "📂 Directory structure:"
+          find . -type f -exec echo "  {}" \;
+          
+          echo ""
+          echo "📊 File sizes:" 
+          find . -type f -exec ls -lh {} \;
+          
+          echo ""
+          echo "✅ Evidence creation test PASSED"
+          
+    params:
+    - name: testName
+      value: "$(params.test-name)"
+  
+  # If file creation works, we can add container build in next iteration
+  - name: prepare-for-container-build
+    runAfter:
+    - create-evidence-files
+    taskSpec:
+      steps:
+      - name: create-dockerfile
+        image: quay.io/konflux-ci/konflux-test:latest
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          echo "📦 Preparing Dockerfile for evidence container..."
+          
+          # Create simple Dockerfile that would work with evidence files
+          cat > /tmp/Dockerfile << 'EOF'
+          FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+          
+          # Create evidence directory
+          RUN mkdir -p /evidence
+          
+          # Copy evidence files (when they exist in build context)
+          # COPY results/ /evidence/results/
+          # COPY SCAN_EVIDENCE.md /evidence/
+          
+          WORKDIR /evidence
+          
+          # Metadata labels
+          LABEL description="Security scan evidence container"
+          LABEL evidence.format="sarif-and-json"
+          LABEL scan.tools="zap-trivy"
+          
+          # Default command
+          CMD ["echo", "Evidence container ready - add COPY commands to include files"]
+          EOF
+          
+          echo "✅ Dockerfile template created:"
+          echo ""
+          cat /tmp/Dockerfile
+          
+          echo ""
+          echo "✅ Build preparation test PASSED"
+          echo "📝 Next step: Add actual container build with Konflux buildah-oci-ta"
