@@ -1,5 +1,5 @@
 apiVersion: tekton.dev/v1
-kind: PipelineRun
+kind: Pipeline
 metadata:
   name: push-oci-artifact-inline-run
 spec:
