@@ -617,7 +617,6 @@ spec:
           mv "dast-evidence-$PIPELINE_RUN.tar.gz" results/dast-evidence-$PIPELINE_RUN.tar.gz
           
           echo "✅ Tarball created: dast-evidence-$PIPELINE_RUN.tar.gz"
-          ls -lh "dast-evidence-$PIPELINE_RUN.tar.gz"
           
       - name: push-evidence-artifact
         image: quay.io/konflux-ci/oras:latest
