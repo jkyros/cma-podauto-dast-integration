@@ -1,0 +1,249 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-container-build-konflux
+  annotations:
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+    pipelinesascode.tekton.dev/on-cel-expression: |
+      event == "push" && target_branch == "test-konflux-build"
+spec:
+  description: |
+    Minimal test pipeline using Konflux buildah-oci-ta task for container builds.
+    Tests the container build process with OpenShift SCCs and proper authentication.
+  params:
+  - name: SNAPSHOT
+    type: string
+    description: The JSON string of the Snapshot object containing components to test
+    default: |
+      {"application":"custom-metrics-autoscaler-operator","components":[{"name":"custom-metrics-autoscaler-operator-bundle","containerImage":"quay.io/example/test-bundle@sha256:abc123"}]}
+  - name: output-image
+    type: string
+    description: Fully Qualified Output Image
+    default: "quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle"
+  tasks:
+  
+  # Create build context with scan results and package as OCI artifact
+  - name: prepare-evidence-build-context
+    timeout: "10m"
+    taskSpec:
+      params:
+      - name: SNAPSHOT
+        type: string
+      - name: namespace
+        type: string
+        default: "test-namespace"
+      - name: ociStorage
+        type: string
+      - name: ociArtifactExpiresAfter
+        type: string
+        default: "6h"
+      results:
+      - name: SOURCE_ARTIFACT
+        description: The SOURCE_ARTIFACT OCI reference for buildah
+      steps:
+      - name: create-build-context
+        image: quay.io/konflux-ci/konflux-test:latest
+        env:
+        - name: SNAPSHOT
+          value: "$(params.SNAPSHOT)"
+        - name: NAMESPACE
+          value: "$(params.namespace)"
+        - name: OCI_STORAGE
+          value: "$(params.ociStorage)"
+        - name: OCI_EXPIRES_AFTER
+          value: "$(params.ociArtifactExpiresAfter)"
+        script: |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          echo "📝 Creating build context with dummy scan results..."
+          
+          # Create build context directory
+          BUILD_DIR="/tmp/evidence-build"
+          mkdir -p "$BUILD_DIR/results"
+          cd "$BUILD_DIR"
+          
+          # Create realistic dummy scan results structure
+          mkdir -p results/cma-operator/DAST-$(date +%Y%m%d-%H%M%S)-RapiDAST-test
+          
+          # Dummy ZAP SARIF result
+          cat > "results/cma-operator/DAST-$(date +%Y%m%d-%H%M%S)-RapiDAST-test/rapidast-scan-results.sarif" << 'EOF'
+          {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [
+              {
+                "tool": {
+                  "driver": {
+                    "name": "ZAP",
+                    "version": "2.14.0"
+                  }
+                },
+                "results": [
+                  {
+                    "ruleId": "test-rule",
+                    "message": {
+                      "text": "This is a dummy test result for Konflux buildah testing"
+                    },
+                    "level": "note"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          
+          # Dummy Trivy result
+          cat > "results/trivy-k8s-misconfig.json" << 'EOF'
+          {
+            "SchemaVersion": 2,
+            "ArtifactName": "test-namespace-konflux",
+            "ArtifactType": "kubernetes",
+            "Results": [
+              {
+                "Target": "Deployment/test-deployment",
+                "Class": "config",
+                "Type": "kubernetes",
+                "Misconfigurations": [
+                  {
+                    "ID": "KSV001",
+                    "Title": "Test misconfiguration (Konflux buildah test)",
+                    "Description": "This is a test misconfiguration finding for Konflux buildah",
+                    "Severity": "MEDIUM",
+                    "Status": "FAIL"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          
+          # Create evidence documentation
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          PIPELINE_RUN="$(context.pipelineRun.name)"
+          
+          # Install jq for JSON parsing
+          microdnf install -y jq
+          
+          COMPONENT_NAME=$(echo "$SNAPSHOT" | jq -r '(.spec.components[]? // .components[]?) | select(.name | test(".*bundle.*|.*operator.*bundle.*"; "i")) | .name' | head -1)
+          
+          cat > SECURITY_SCAN_EVIDENCE.md << EOF
+          # CMA Operator - DAST Security Scan Evidence (KONFLUX BUILDAH TEST)
+          
+          **Scan Date**: $TIMESTAMP  
+          **Pipeline**: $PIPELINE_RUN  
+          **Component**: $COMPONENT_NAME
+          **Namespace**: $NAMESPACE
+          **Build Method**: Konflux buildah-oci-ta task
+          **NOTE**: This is a test build using Konflux-native container build
+          
+          ## Evidence Contents
+          - ZAP scan results (SARIF format) - DUMMY DATA FOR TESTING
+          - Trivy misconfiguration findings (JSON format) - DUMMY DATA FOR TESTING
+          - Complete evidence documentation
+          
+          ## Test Verification
+          This container was built using the Konflux buildah-oci-ta task to verify:
+          ✅ OpenShift SCC compatibility
+          ✅ Registry authentication  
+          ✅ OCI artifact handling
+          ✅ Container build and push process
+          
+          ## Access Instructions
+          \`\`\`bash
+          # Pull evidence container
+          podman pull quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:konflux-test-$PIPELINE_RUN
+          
+          # View summary
+          podman run --rm quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:konflux-test-$PIPELINE_RUN
+          \`\`\`
+          EOF
+          
+          # Create Dockerfile
+          cat > Dockerfile << 'EOF'
+          FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+          
+          # Install tools for evidence examination
+          RUN microdnf install -y jq findutils && microdnf clean all
+          
+          # Copy evidence
+          RUN mkdir -p /evidence
+          COPY results/ /evidence/results/
+          COPY SECURITY_SCAN_EVIDENCE.md /evidence/
+          
+          WORKDIR /evidence
+          
+          # Labels for traceability
+          LABEL description="DAST Security Scan Evidence (KONFLUX BUILDAH TEST)"
+          LABEL scan.component="custom-metrics-autoscaler-operator"
+          LABEL scan.tools="rapidast-zap-trivy"
+          LABEL scan.pipeline="konflux-dast-integration-test"
+          LABEL build.method="konflux-buildah-oci-ta"
+          LABEL build.type="test"
+          
+          CMD ["cat", "/evidence/SECURITY_SCAN_EVIDENCE.md"]
+          EOF
+          
+          echo "✅ Build context created:"
+          ls -la "$BUILD_DIR"
+          echo ""
+          echo "📂 Results directory:"
+          find "$BUILD_DIR/results" -type f
+          echo ""
+          echo "📄 Dockerfile contents:"
+          head -20 Dockerfile
+          
+          # Package build context into OCI artifact (like git-clone-oci-ta does)
+          echo "📦 Packaging build context into OCI artifact..."
+          
+          # Install and configure buildah for OCI artifact creation
+          microdnf install -y buildah
+          
+          # Create OCI artifact with build context
+          tar -czf build-context.tar.gz -C "$BUILD_DIR" .
+          
+          # Use buildah to push the build context as an OCI artifact
+          # This mimics what git-clone-oci-ta does
+          buildah from --name build-context-container scratch
+          buildah copy build-context-container build-context.tar.gz /build-context.tar.gz
+          buildah config --workingdir / build-context-container
+          buildah commit build-context-container "$OCI_STORAGE"
+          
+          echo "✅ Build context packaged as OCI artifact: $OCI_STORAGE"
+          
+          # Output the SOURCE_ARTIFACT result for buildah-oci-ta
+          echo -n "$OCI_STORAGE" | tee $(results.SOURCE_ARTIFACT.path)
+    params:
+    - name: SNAPSHOT
+      value: "$(params.SNAPSHOT)"
+    - name: ociStorage
+      value: "$(params.output-image).build-context"
+  
+  # Use Konflux buildah-oci-ta task to build container
+  - name: build-evidence-container-konflux
+    runAfter:
+    - prepare-evidence-build-context
+    timeout: "15m"
+    taskRef:
+      resolver: bundles
+      params:
+      - name: name
+        value: buildah-oci-ta
+      - name: bundle
+        value: quay.io/konflux-ci/tekton-catalog/task-buildah-oci-ta:0.4@sha256:d78d8abba7a84faa391d8b3b23be49ad8c09e9b1c0cabaed3919f64100cead2d
+      - name: kind
+        value: task
+    params:
+    - name: IMAGE
+      value: "$(params.output-image):konflux-test-$(context.pipelineRun.name)"
+    - name: DOCKERFILE
+      value: "Dockerfile"
+    - name: CONTEXT
+      value: "."
+    - name: HERMETIC
+      value: "false"
+    - name: IMAGE_EXPIRES_AFTER
+      value: "6h"  # Keep test containers for 6 hours
+    - name: SOURCE_ARTIFACT
+      value: "$(tasks.prepare-evidence-build-context.results.SOURCE_ARTIFACT)"
+    # Note: buildah-oci-ta handles registry authentication automatically in Konflux
