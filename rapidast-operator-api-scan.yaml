@@ -22,7 +22,7 @@ spec:
     type: string
     description: Timeout for the DAST scan
     default: "600"
-  
+
   tasks:
   # Extract bundle image from snapshot
   - name: extract-bundle-image
@@ -59,108 +59,38 @@ spec:
     - name: SNAPSHOT
       value: "$(params.SNAPSHOT)"
 
-  # Provision EaaS space
-  - name: provision-eaas-space
+  # Provision ephemeral cluster via OCP-CI
+  - name: provision-cluster
+    timeout: "2h"
     taskRef:
       resolver: git
       params:
         - name: url
-          value: https://github.com/konflux-ci/build-definitions.git
+          value: https://github.com/openshift/konflux-tasks
         - name: revision
           value: main
         - name: pathInRepo
-          value: task/eaas-provision-space/0.1/eaas-provision-space.yaml
+          value: tasks/provision-ephemeral-cluster/0.1/provision-ephemeral-cluster.yaml
     params:
-    - name: ownerName
-      value: $(context.pipelineRun.name)
-    - name: ownerUid
-      value: $(context.pipelineRun.uid)
+      - name: ownerName
+        value: $(context.pipelineRun.name)
+      - name: ownerUid
+        value: $(context.pipelineRun.uid)
+      - name: clusterProfile
+        value: aws-konflux-prod
+      - name: workflow
+        value: hypershift-hostedcluster-workflow
+      - name: env
+        value: '{"COMPUTE_NODE_TYPE":"m5.xlarge","HYPERSHIFT_NODE_COUNT":"3","HOSTED_MANAGEMENT_CLUSTER":"hosted-mgmt2","IMAGE_CONTENT_SOURCES":"- mirrors:\n  - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator\n  source: registry.redhat.io/openshift-keda-tech-preview\n- mirrors:\n  - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator\n  source: registry.redhat.io/openshift-keda-tech-preview/custom-metrics-autoscaler-rhel9-operator\n- mirrors:\n  - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler\n  source: registry.redhat.io/openshift-keda-tech-preview/custom-metrics-autoscaler-rhel9\n- mirrors:\n  - quay.io/redhat-user-workloads/cma-podauto-tenant/http-addon-operator/http-addon-operator\n  source: registry.stage.redhat.io/openshift-keda-tech-preview/http-add-on-operator-rhel9\n- mirrors:\n  - quay.io/redhat-user-workloads/cma-podauto-tenant/http-addon-interceptor/http-addon-interceptor\n  source: registry.stage.redhat.io/openshift-keda-tech-preview/http-add-on-interceptor-rhel9"}'
+      - name: releases
+        value: '{"latest":{"release":{"channel":"stable","version":"4.21","architecture":"multi"}}}'
 
-  # Create ephemeral cluster with image mirroring
-  - name: provision-cluster
-    runAfter:
-    - provision-eaas-space
-    timeout: "20m"  # Allow 20 minutes for cluster provisioning
-    taskSpec:
-      results:
-      - name: clusterName
-        value: "$(steps.create-cluster.results.clusterName)"
-      steps:
-      - name: get-supported-versions
-        ref:
-          resolver: git
-          params:
-          - name: url
-            value: https://github.com/konflux-ci/build-definitions.git
-          - name: revision
-            value: main
-          - name: pathInRepo
-            value: stepactions/eaas-get-supported-ephemeral-cluster-versions/0.1/eaas-get-supported-ephemeral-cluster-versions.yaml
-        params:
-        - name: eaasSpaceSecretRef
-          value: $(tasks.provision-eaas-space.results.secretRef)
-      - name: pick-version
-        ref:
-          resolver: git
-          params:
-          - name: url
-            value: https://github.com/konflux-ci/build-definitions.git
-          - name: revision
-            value: main
-          - name: pathInRepo
-            value: stepactions/eaas-get-latest-openshift-version-by-prefix/0.1/eaas-get-latest-openshift-version-by-prefix.yaml
-        params:
-        - name: prefix
-          value: "$(steps.get-supported-versions.results.versions[0])."
-      - name: create-cluster
-        ref:
-          resolver: git
-          params:
-          - name: url
-            value: https://github.com/konflux-ci/build-definitions.git
-          - name: revision
-            value: main
-          - name: pathInRepo
-            value: stepactions/eaas-create-ephemeral-cluster-hypershift-aws/0.1/eaas-create-ephemeral-cluster-hypershift-aws.yaml
-        params:
-          - name: eaasSpaceSecretRef
-            value: $(tasks.provision-eaas-space.results.secretRef)
-          - name: version
-            value: "$(steps.pick-version.results.version)"
-          - name: imageContentSources
-            value: |
-              - mirrors:
-                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator-bundle
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator-bundle
-                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-operator-bundle
-              - mirrors:
-                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-adapter
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-adapter
-                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-adapter-rhel9
-              - mirrors:
-                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-webhooks
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-webhooks
-                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-admission-webhooks-rhel9
-              - mirrors:
-                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/custom-metrics-autoscaler-operator
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator
-                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9-operator
-              - mirrors:
-                - registry.stage.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/custom-metrics-autoscaler-operator/keda-operator
-                - quay.io/redhat-user-workloads/cma-podauto-tenant/keda-operator
-                source: registry.redhat.io/custom-metrics-autoscaler/custom-metrics-autoscaler-rhel9
-
-  # Deploy the operator 
+  # Deploy the operator
   - name: deploy-operator
     runAfter:
     - provision-cluster
     - extract-bundle-image
-    timeout: "30m"  # Allow 30 minutes for operator deployment
+    timeout: "30m"
     taskSpec:
       params:
       - name: bundle-image
@@ -168,36 +98,20 @@ spec:
       - name: namespace
         type: string
       volumes:
-      - name: credentials
-        emptyDir: {}
+      - name: cluster-credentials
+        secret:
+          secretName: $(tasks.provision-cluster.results.secretRef)
       steps:
-      - name: get-kubeconfig
-        ref:
-          resolver: git
-          params:
-          - name: url
-            value: https://github.com/konflux-ci/build-definitions.git
-          - name: revision
-            value: main
-          - name: pathInRepo
-            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
-        params:
-        - name: eaasSpaceSecretRef
-          value: $(tasks.provision-eaas-space.results.secretRef)
-        - name: clusterName
-          value: "$(tasks.provision-cluster.results.clusterName)"
-        - name: credentials
-          value: credentials
       - name: create-namespace
         image: quay.io/konflux-ci/konflux-test:latest
         env:
         - name: KUBECONFIG
-          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+          value: /tmp/cluster-credentials/kubeconfig
         - name: NAMESPACE
           value: "$(params.namespace)"
         volumeMounts:
-        - name: credentials
-          mountPath: /credentials
+        - name: cluster-credentials
+          mountPath: /tmp/cluster-credentials
         script: |
           #!/bin/bash
           set -euxo pipefail
@@ -208,14 +122,14 @@ spec:
         image: quay.io/operator-framework/operator-sdk:latest
         env:
         - name: KUBECONFIG
-          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+          value: /tmp/cluster-credentials/kubeconfig
         - name: BUNDLE_IMAGE
           value: "$(params.bundle-image)"
         - name: NAMESPACE
           value: "$(params.namespace)"
         volumeMounts:
-        - name: credentials
-          mountPath: /credentials
+        - name: cluster-credentials
+          mountPath: /tmp/cluster-credentials
         script: |
           #!/bin/bash
           set -euxo pipefail
@@ -232,46 +146,30 @@ spec:
   - name: configure-keda
     runAfter:
     - deploy-operator
-    timeout: "15m"  # Allow 15 minutes for KEDA configuration
+    timeout: "15m"
     taskSpec:
       params:
       - name: namespace
         type: string
       volumes:
-      - name: credentials
-        emptyDir: {}
+      - name: cluster-credentials
+        secret:
+          secretName: $(tasks.provision-cluster.results.secretRef)
       steps:
-      - name: get-kubeconfig
-        ref:
-          resolver: git
-          params:
-          - name: url
-            value: https://github.com/konflux-ci/build-definitions.git
-          - name: revision
-            value: main
-          - name: pathInRepo
-            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
-        params:
-        - name: eaasSpaceSecretRef
-          value: $(tasks.provision-eaas-space.results.secretRef)
-        - name: clusterName
-          value: "$(tasks.provision-cluster.results.clusterName)"
-        - name: credentials
-          value: credentials
       - name: create-kedacontroller
         image: quay.io/konflux-ci/konflux-test:latest
         env:
         - name: KUBECONFIG
-          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+          value: /tmp/cluster-credentials/kubeconfig
         - name: NAMESPACE
           value: "$(params.namespace)"
         volumeMounts:
-        - name: credentials
-          mountPath: /credentials
+        - name: cluster-credentials
+          mountPath: /tmp/cluster-credentials
         script: |
           #!/bin/bash
           set -euxo pipefail
-          
+
           echo "Creating KedaController instance..."
           oc apply -f - <<EOF
           apiVersion: keda.sh/v1alpha1
@@ -288,7 +186,7 @@ spec:
             serviceAccount: {}
             watchNamespace: ""
           EOF
-          
+
           echo "Waiting for KEDA components to be ready..."
           timeout 300s bash -c "
             until [ \"\$(oc get deployment -n $NAMESPACE keda-metrics-apiserver -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status}' 2>/dev/null)\" = \"True\" ]; do
@@ -297,7 +195,7 @@ spec:
             done
           "
           echo " KEDA metrics-apiserver ready"
-          
+
           timeout 300s bash -c "
             until [ \"\$(oc get deployment -n $NAMESPACE keda-operator -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status}' 2>/dev/null)\" = \"True\" ]; do
               echo -n .
@@ -305,8 +203,8 @@ spec:
             done
           "
           echo " KEDA operator ready"
-          
-          echo "✅ KEDA controller is fully operational"
+
+          echo "KEDA controller is fully operational"
     params:
     - name: namespace
       value: "$(params.NAMESPACE)"
@@ -315,14 +213,15 @@ spec:
   - name: rapidast-api-scan
     runAfter:
     - configure-keda
-    timeout: "45m"  # Increase timeout to 45 minutes for DAST scanning
+    timeout: "45m"
     taskSpec:
       params:
       - name: namespace
         type: string
       volumes:
-      - name: credentials
-        emptyDir: {}
+      - name: cluster-credentials
+        secret:
+          secretName: $(tasks.provision-cluster.results.secretRef)
       - name: rapidast-config
         emptyDir: {}
       - name: rapidast-results
@@ -334,55 +233,36 @@ spec:
           - key: .dockerconfigjson
             path: config.json
       steps:
-      - name: get-kubeconfig
-        ref:
-          resolver: git
-          params:
-          - name: url
-            value: https://github.com/konflux-ci/build-definitions.git
-          - name: revision
-            value: main
-          - name: pathInRepo
-            value: stepactions/eaas-get-ephemeral-cluster-credentials/0.1/eaas-get-ephemeral-cluster-credentials.yaml
-        params:
-        - name: eaasSpaceSecretRef
-          value: $(tasks.provision-eaas-space.results.secretRef)
-        - name: clusterName
-          value: "$(tasks.provision-cluster.results.clusterName)"
-        - name: credentials
-          value: credentials
       - name: prepare-rapidast-config
         image: quay.io/konflux-ci/konflux-test:latest
         env:
         - name: KUBECONFIG
-          value: "/credentials/$(steps.get-kubeconfig.results.kubeconfig)"
+          value: /tmp/cluster-credentials/kubeconfig
         - name: NAMESPACE
           value: "$(params.namespace)"
         volumeMounts:
-        - name: credentials
-          mountPath: /credentials
+        - name: cluster-credentials
+          mountPath: /tmp/cluster-credentials
         - name: rapidast-config
           mountPath: /rapidast-config
         script: |
           #!/bin/bash
           set -euxo pipefail
-          
-          # Get cluster API server URL and kubeconfig info
+
+          # Get cluster API server URL
           API_SERVER=$(oc whoami --show-server)
-          KUBECONFIG_FILE=$(basename "$KUBECONFIG")
           echo "Cluster API server: $API_SERVER"
-          echo "Using kubeconfig: $KUBECONFIG_FILE"
-          
+
           # Create a service account and token for RapiDAST scanning
           echo "Creating service account for RapiDAST in namespace: $NAMESPACE"
           oc create serviceaccount rapidast-scanner -n $NAMESPACE --dry-run=client -o yaml | oc apply -f -
-          
+
           # Create cluster-admin rolebinding for the service account
           oc create clusterrolebinding rapidast-scanner-admin-$(date +%s) \
             --clusterrole=cluster-admin \
             --serviceaccount=$NAMESPACE:rapidast-scanner \
             --dry-run=client -o yaml | oc apply -f -
-          
+
           # Wait for the service account token to be created
           echo "Waiting for service account token..."
           for i in {1..30}; do
@@ -393,33 +273,33 @@ spec:
             echo -n "."
             sleep 2
           done
-          
+
           if [ -z "$BEARER_TOKEN" ]; then
-            echo "❌ Failed to create service account token"
+            echo "Failed to create service account token"
             echo "Trying to extract token from kubeconfig..."
             # Try to get token from current context (fallback)
             BEARER_TOKEN=$(oc whoami -t 2>/dev/null || echo "")
           fi
-          
+
           if [ -n "$BEARER_TOKEN" ]; then
-            echo "✅ Got bearer token (length: ${#BEARER_TOKEN})"
-            
+            echo "Got bearer token (length: ${#BEARER_TOKEN})"
+
             # Wait for RBAC permissions to propagate
-            echo "⏳ Waiting for RBAC permissions to propagate..."
+            echo "Waiting for RBAC permissions to propagate..."
             sleep 10
-            
+
             # Test the token works with a basic API call
             echo "Testing token access..."
             if oc whoami --token="$BEARER_TOKEN" >/dev/null 2>&1; then
-              echo "✅ Service account token is valid"
+              echo "Service account token is valid"
             else
-              echo "⚠️ Service account token validation failed, but continuing..."
+              echo "Service account token validation failed, but continuing..."
             fi
           else
-            echo "❌ No bearer token available - this may cause RapiDAST authentication to fail"
+            echo "No bearer token available - this may cause RapiDAST authentication to fail"
             BEARER_TOKEN="PLACEHOLDER_TOKEN"
           fi
-          
+
           # Create RapiDAST config from template
           cat > /rapidast-config/config.yaml << EOF
           config:
@@ -454,26 +334,24 @@ spec:
                     enableUI: False
                     updateAddons: False
                     overrideConfigs:
-                        - formhandler.fields.field(0).fieldId=namespace   
+                        - formhandler.fields.field(0).fieldId=namespace
                         - formhandler.fields.field(0).value=$NAMESPACE
-                        - formhandler.fields.field(1).fieldId=name   
+                        - formhandler.fields.field(1).fieldId=name
                         - formhandler.fields.field(1).value=default
 
                   report:
                       format: ["json","html","sarif"]
-                      
+
               generic_trivy:
                   # Scan operator workloads by resource type (exclude infrastructure Jobs) + try label-based filtering
-                  inline: "export KUBECONFIG=/credentials/$KUBECONFIG_FILE && echo 'Using kubeconfig: /credentials/$KUBECONFIG_FILE' && echo 'Scanning operator workloads (excluding infrastructure jobs)...' && echo 'Deployed resources in namespace:' && kubectl get all,configmap,secret,sa,role,rolebinding -n $NAMESPACE && trivy k8s --include-namespaces $NAMESPACE --include-kinds Deployment,StatefulSet,DaemonSet,Pod,ConfigMap,Secret,Service,ServiceAccount,Role,RoleBinding,ClusterRole,ClusterRoleBinding --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
+                  inline: "export KUBECONFIG=/tmp/cluster-credentials/kubeconfig && echo 'Scanning operator workloads (excluding infrastructure jobs)...' && echo 'Deployed resources in namespace:' && kubectl get all,configmap,secret,sa,role,rolebinding -n $NAMESPACE && trivy k8s --include-namespaces $NAMESPACE --include-kinds Deployment,StatefulSet,DaemonSet,Pod,ConfigMap,Secret,Service,ServiceAccount,Role,RoleBinding,ClusterRole,ClusterRoleBinding --severity=HIGH,CRITICAL --scanners=misconfig --report all --format json --output /opt/rapidast/results/trivy-k8s-misconfig.json || echo 'Trivy scan completed with warnings'"
           EOF
-          
-          echo "✅ RapiDAST configuration prepared"
+
+          echo "RapiDAST configuration prepared"
           echo "Scanning API endpoint: $API_SERVER/openapi/v3/apis/keda.sh/v1alpha1"
       - name: run-rapidast-scan
         image: quay.io/redhatproductsecurity/rapidast:latest
         env:
-        - name: KUBECONFIG_FILE
-          value: "$(steps.get-kubeconfig.results.kubeconfig)"  
         - name: NAMESPACE
           value: "$(params.namespace)"
         volumeMounts:
@@ -481,86 +359,68 @@ spec:
           mountPath: /rapidast-config
         - name: rapidast-results
           mountPath: /opt/rapidast/results
-        - name: credentials
-          mountPath: /credentials
+        - name: cluster-credentials
+          mountPath: /tmp/cluster-credentials
         script: |
           #!/bin/bash
           set -euxo pipefail
-          
+
           echo "Starting RapiDAST scan of CMA operator APIs..."
           echo "Config file:"
           cat /rapidast-config/config.yaml
           echo "================================"
-          
+
           # Debug: Test API endpoint accessibility
           API_SERVER=$(grep -E 'url:|apiUrl:' /rapidast-config/config.yaml | head -1 | sed 's/.*: *"//' | sed 's/".*//' | sed 's/ *$//')
           OPENAPI_URL=$(grep 'apiUrl:' /rapidast-config/config.yaml | sed 's/.*apiUrl: *"//' | sed 's/".*//')
-          
-          echo "🔍 Debug: Testing API endpoint accessibility..."
+
+          echo "Debug: Testing API endpoint accessibility..."
           echo "API Server: $API_SERVER"
           echo "OpenAPI URL: $OPENAPI_URL"
-          
+
           # Test if the API server is reachable
           if curl -k -s --connect-timeout 10 "$API_SERVER" >/dev/null; then
-            echo "✅ API server is reachable"
+            echo "API server is reachable"
           else
-            echo "❌ API server is not reachable"
+            echo "API server is not reachable"
           fi
-          
+
           # Test token permissions first
-          echo "🔍 Testing service account token permissions..."
-          # Extract token without the "Bearer " prefix since we'll add it
+          echo "Testing service account token permissions..."
           TOKEN=$(grep -A5 'authentication:' /rapidast-config/config.yaml | grep 'value:' | sed 's/.*value: *"Bearer *//' | sed 's/".*//')
           echo "Testing with token (length: ${#TOKEN})"
-          
+
           # Test basic cluster access
           echo "Testing basic cluster access..."
           if curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$API_SERVER/api/v1/namespaces" | grep -q '"kind":"NamespaceList"' 2>/dev/null; then
-            echo "✅ Service account has basic cluster access"
+            echo "Service account has basic cluster access"
           else
-            echo "❌ Service account lacks basic cluster access"
+            echo "Service account lacks basic cluster access"
           fi
-          
-          echo "🎯 CHECKPOINT 1: Basic authentication working"
-          
+
           # Test if the OpenAPI endpoint returns content
           echo "Testing OpenAPI endpoint..."
           if curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$OPENAPI_URL" | grep -q '"openapi"' 2>/dev/null; then
-            echo "✅ OpenAPI endpoint returned valid content"
+            echo "OpenAPI endpoint returned valid content"
           elif curl -k -s --connect-timeout 10 -H "Authorization: Bearer $TOKEN" "$OPENAPI_URL" | grep -q '"kind":"Status"' 2>/dev/null; then
-            echo "❌ OpenAPI endpoint returned error (likely API not available yet)"
+            echo "OpenAPI endpoint returned error (likely API not available yet)"
           else
-            echo "❌ OpenAPI endpoint not accessible"
+            echo "OpenAPI endpoint not accessible"
           fi
           echo ""
-          
-          echo "🎯 CHECKPOINT 2: OpenAPI endpoint tested"
-          
-          # Since OpenAPI endpoint test succeeded, KEDA APIs are available - proceed with scan
-          echo "✅ KEDA API endpoint confirmed accessible via HTTP - proceeding with scan"
-          echo ""
-          
-          echo "🎯 CHECKPOINT 3: About to start RapiDAST scan"
-          
-          # Run RapiDAST scan with correct log level
+
+          # Run RapiDAST scan
           echo "Starting RapiDAST scan..."
-          echo "🎯 CHECKPOINT 4: RapiDAST process starting..."
-          
           python3 /opt/rapidast/rapidast.py --config /rapidast-config/config.yaml --log-level info 2>&1 || {
-            echo "⚠️ RapiDAST scan completed with errors, but continuing..."
+            echo "RapiDAST scan completed with errors, but continuing..."
           }
-          
-          echo "🎯 CHECKPOINT 5: RapiDAST process finished"
-          echo "✅ RapiDAST scan completed"
-          echo "🎯 CHECKPOINT 6: About to examine results"
-          
+
+          echo "RapiDAST scan completed"
           echo "Results directory structure:"
           find /opt/rapidast/results -type f 2>/dev/null | head -20
           echo ""
           echo "Results summary:"
           ls -la /opt/rapidast/results/
-          
-          echo "🎯 CHECKPOINT 7: Results examination complete, proceeding to display step"
       - name: display-results
         image: quay.io/konflux-ci/konflux-test:latest
         volumeMounts:
@@ -569,17 +429,15 @@ spec:
         script: |
           #!/bin/bash
           set -euxo pipefail
-          
-          echo "🎯 CHECKPOINT 8: Display results step started"
-          
-          echo "🔍 RapiDAST + Trivy Scan Results Summary"
+
+          echo "RapiDAST + Trivy Scan Results Summary"
           echo "========================================"
-          
+
           echo "All result files generated:"
           find /results
           echo ""
-          
-          echo "✅ Scan Results Available and displayed above"
+
+          echo "Scan Results Available and displayed above"
           echo ""
       - name: create-evidence-tarball
         image: quay.io/konflux-ci/konflux-test:latest
@@ -589,35 +447,35 @@ spec:
         script: |
           #!/bin/bash
           set -euxo pipefail
-          
-          echo "📦 Creating evidence tarball..."
+
+          echo "Creating evidence tarball..."
           PIPELINE_RUN="$(context.pipelineRun.name)"
-          
+
           # Create evidence summary
           cat > /results/SCAN_EVIDENCE.md << EOF
           # DAST Security Scan Evidence
-          
+
           **Pipeline**: $PIPELINE_RUN
           **Timestamp**: $(date -u)
           **Component**: Custom Metrics Autoscaler Operator
-          
+
           ## Usage
           \`\`\`bash
           # Extract evidence tarball
           tar -xzf dast-evidence-$PIPELINE_RUN.tar.gz
-          
-          # Find scan results  
+
+          # Find scan results
           ls -la *.sarif *.json *.html 2>/dev/null || echo "Check subdirectories"
           \`\`\`
           EOF
-          
+
           # Create tarball of all results
           tar -czf "dast-evidence-$PIPELINE_RUN.tar.gz" results/ 2>/dev/null || echo "Empty results"
-          # Move the tarball into the directory so the next step can share it 
+          # Move the tarball into the directory so the next step can share it
           mv "dast-evidence-$PIPELINE_RUN.tar.gz" results/dast-evidence-$PIPELINE_RUN.tar.gz
-          
-          echo "✅ Tarball created: dast-evidence-$PIPELINE_RUN.tar.gz"
-          
+
+          echo "Tarball created: dast-evidence-$PIPELINE_RUN.tar.gz"
+
       - name: push-evidence-artifact
         image: quay.io/konflux-ci/oras:latest
         env:
@@ -631,27 +489,23 @@ spec:
         script: |
           #!/bin/bash
           set -euxo pipefail
-          
+
           PIPELINE_RUN="$(context.pipelineRun.name)"
           ARTIFACT_URL="quay.io/jkyros/custom-metrics-autoscaler-konflux-operator-bundle:dast-evidence-$PIPELINE_RUN"
-          
+
           cd /results
           TARBALL="dast-evidence-$PIPELINE_RUN.tar.gz"
-          
-          echo "🚀 Pushing $TARBALL to $ARTIFACT_URL"
-          
+
+          echo "Pushing $TARBALL to $ARTIFACT_URL"
+
           oras push "$ARTIFACT_URL" \
             --artifact-type application/vnd.cma.dast.evidence.v1+tar \
             --annotation "evidence.pipeline=$PIPELINE_RUN" \
             --annotation "evidence.timestamp=$(date -u)" \
             "$TARBALL:application/gzip"
-          
-          echo "✅ Evidence artifact pushed successfully!"
-          echo "📍 Pull with: oras pull $ARTIFACT_URL"
+
+          echo "Evidence artifact pushed successfully!"
+          echo "Pull with: oras pull $ARTIFACT_URL"
     params:
     - name: namespace
       value: "$(params.NAMESPACE)"
-    - name: SNAPSHOT
-      value: "$(params.SNAPSHOT)"
-
-  # Cleanup happens automatically when pipeline completes 
